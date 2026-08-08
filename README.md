@@ -1,1 +1,0 @@
-# tenisz_ai
