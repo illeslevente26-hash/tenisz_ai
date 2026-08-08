@@ -1,0 +1,25 @@
+name: Tenisz AI Futtato (LIVE 15m)
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # 15 percenként automatikusan lefut
+  workflow_dispatch: # Kézi indítás gombbal bármikor
+
+jobs:
+  run-ai:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kod letoltese
+        uses: actions/checkout@v3
+
+      - name: Python beallitasa
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Csomagok telepitese
+        run: |
+          pip install numpy pandas scipy requests beautifulsoup4
+
+      - name: AI Futtatasa
+        run: python main.py
