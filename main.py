@@ -1,746 +1,1958 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
+============================================================
 🎾 TENNIS AI ANALYST PRO
-100% API-alapú, valós mérkőzések, komplex AI elemzés
+API Tennis alapú teniszelemző
+============================================================
+
+API:
+    https://api.api-tennis.com/tennis/
+
+API kulcs:
+    RAPIDAPI_KEY helyett API_TENNIS_KEY
+
+GitHub Actions Secret:
+    API_TENNIS_KEY
+
+Használat:
+    python main.py --today
+    python main.py --tomorrow
+    python main.py --live
+    python main.py --date 2026-08-10
+    python main.py --match "Carlos Alcaraz vs Novak Djokovic"
+    python main.py --match "Carlos Alcaraz vs Novak Djokovic" --surface hard
 """
 
 import os
 import sys
 import json
+import math
+import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
 import argparse
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import requests
-from collections import defaultdict
 
-# ============================================================================
+
+# ============================================================
 # KONFIGURÁCIÓ
-# ============================================================================
+# ============================================================
+
+API_KEY = os.getenv("API_TENNIS_KEY", "").strip()
+
+BASE_URL = "https://api.api-tennis.com/tennis/"
+
+TIMEZONE = "Europe/Budapest"
+
+REQUEST_TIMEOUT = 30
+
+# Mennyi historikus meccset használjunk játékosforma számításához
+FORM_MATCH_LIMIT = 20
+
+# Cache
+CACHE_DIR = "cache"
+RESULTS_DIR = "results"
+
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger(__name__)
 
-# API konfiguráció
-API_KEY = os.getenv('RAPIDAPI_KEY', '').strip()
-API_HOST = 'api-tennis.p.rapidapi.com'
-BASE_URL = f'https://{API_HOST}'
-HEADERS = {
-    'X-RapidAPI-Key': API_KEY,
-    'X-RapidAPI-Host': API_HOST
-}
+logger = logging.getLogger("tennis-ai")
 
-# ============================================================================
-# API ADATLEKÉRŐ RÉTEG
-# ============================================================================
 
-class TennisDataFetcher:
-    """Minden adat API-ból jön, semmi kitalált!"""
-    
-    @staticmethod
-    def _api_get(endpoint: str, params: dict = None) -> Optional[dict]:
-        """API hívás hibakezeléssel"""
-        if not API_KEY:
-            logger.error("❌ Nincs API kulcs! Állítsd be a RAPIDAPI_KEY környezeti változót!")
-            return None
-            
+# ============================================================
+# SEGÉDFÜGGVÉNYEK
+# ============================================================
+
+def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """Biztonságos float konverzió."""
+
+    if value is None:
+        return default
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+
+    if not text:
+        return default
+
+    text = text.replace("%", "").replace(",", ".")
+
+    try:
+        return float(text)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    """Biztonságos integer konverzió."""
+
+    if value is None:
+        return default
+
+    try:
+        return int(float(str(value).strip()))
+    except (ValueError, TypeError):
+        return default
+
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def normalize_name(name: str) -> str:
+    """Játékosnév összehasonlításhoz."""
+
+    return " ".join(
+        str(name).lower().replace(".", "").split()
+    )
+
+
+def parse_date(value: str) -> Optional[datetime]:
+    """Dátum/idő felismerése."""
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d",
+    ]
+
+    for fmt in formats:
         try:
-            url = f"{BASE_URL}{endpoint}"
-            response = requests.get(url, headers=HEADERS, params=params, timeout=15)
-            
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 403:
-                logger.error(f"❌ API kulcs érvénytelen! (403 Forbidden)")
-            elif response.status_code == 429:
-                logger.warning("⚠️ API limit elérve, várj egy percet...")
-            else:
-                logger.error(f"❌ API hiba: {response.status_code} - {response.text[:200]}")
-            return None
-        except requests.exceptions.Timeout:
-            logger.error("❌ API időtúllépés")
-            return None
-        except Exception as e:
-            logger.error(f"❌ API hiba: {e}")
-            return None
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
 
-    @staticmethod
-    def get_live_matches() -> List[Dict]:
-        """ÉLŐ mérkőzések"""
-        data = TennisDataFetcher._api_get('/api/tennis/matches/live')
-        if data and 'matches' in data:
-            return data['matches']
-        if data and 'events' in data:
-            return data['events']
-        return []
+    return None
 
-    @staticmethod
-    def get_upcoming_matches(date: str = None) -> List[Dict]:
-        """KÖZELGŐ mérkőzések"""
-        if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
-        
-        data = TennisDataFetcher._api_get('/api/tennis/events', {'date': date})
-        
-        if data:
-            matches = []
-            for key in ['events', 'matches', 'fixtures', 'results']:
-                if key in data and isinstance(data[key], list):
-                    for item in data[key]:
-                        match = TennisDataFetcher._parse_match(item)
-                        if match:
-                            matches.append(match)
-                    if matches:
-                        return matches
-            
-            # Ha egyik sem működik, próbáljuk a nyers adatot
-            if isinstance(data, list):
-                for item in data:
-                    match = TennisDataFetcher._parse_match(item)
-                    if match:
-                        matches.append(match)
-            
-            return matches
-        return []
 
-    @staticmethod
-    def get_player_stats(player_name: str) -> Dict:
-        """Játékos statisztikák API-ból"""
-        # Keresés a játékosra
-        search_data = TennisDataFetcher._api_get('/api/tennis/search', {'name': player_name})
-        
-        player_id = None
-        if search_data:
-            for key in ['players', 'results', 'data']:
-                if key in search_data and isinstance(search_data[key], list) and search_data[key]:
-                    player_id = search_data[key][0].get('id') or search_data[key][0].get('playerId')
-                    break
-        
-        if player_id:
-            # Részletes statisztikák
-            stats_data = TennisDataFetcher._api_get(f'/api/tennis/player/{player_id}')
-            if stats_data:
-                for key in ['player', 'stats', 'data']:
-                    if key in stats_data:
-                        return stats_data[key]
-        
-        # Ranking adatok
-        rank_data = TennisDataFetcher._api_get('/api/tennis/rankings', {'player': player_name})
-        if rank_data:
-            for key in ['rankings', 'players', 'data']:
-                if key in rank_data and isinstance(rank_data[key], list) and rank_data[key]:
-                    return rank_data[key][0]
-        
-        return {}
+def sigmoid(x: float) -> float:
+    """Numerikusan stabil sigmoid."""
 
-    @staticmethod
-    def get_h2h(player1: str, player2: str) -> Dict:
-        """Egymás elleni statisztika API-ból"""
-        data = TennisDataFetcher._api_get('/api/tennis/h2h', {
-            'player1': player1,
-            'player2': player2
-        })
-        
-        if data:
-            for key in ['h2h', 'results', 'matches', 'data']:
-                if key in data:
-                    return data[key]
-        
-        return {}
+    if x < -50:
+        return 0.0
 
-    @staticmethod
-    def get_tournament_info(tournament_name: str) -> Dict:
-        """Torna információk API-ból"""
-        data = TennisDataFetcher._api_get('/api/tennis/tournaments', {'name': tournament_name})
-        
-        if data:
-            for key in ['tournaments', 'results', 'data']:
-                if key in data and isinstance(data[key], list) and data[key]:
-                    return data[key][0]
-        
-        return {}
+    if x > 50:
+        return 1.0
 
-    @staticmethod
-    def _parse_match(item: dict) -> Optional[Dict]:
-        """API válasz egységesítése"""
-        if not isinstance(item, dict):
-            return None
-        
-        # Játékosok kinyerése (többféle API formátum)
-        p1 = None
-        p2 = None
-        
-        # Formátum 1: home/away
-        if 'homeTeam' in item and 'awayTeam' in item:
-            p1 = item['homeTeam'].get('name') if isinstance(item['homeTeam'], dict) else str(item['homeTeam'])
-            p2 = item['awayTeam'].get('name') if isinstance(item['awayTeam'], dict) else str(item['awayTeam'])
-        
-        # Formátum 2: player1/player2
-        if not p1 and 'player1' in item:
-            p1 = item['player1'].get('name') if isinstance(item['player1'], dict) else str(item['player1'])
-        if not p2 and 'player2' in item:
-            p2 = item['player2'].get('name') if isinstance(item['player2'], dict) else str(item['player2'])
-        
-        # Formátum 3: team1/team2
-        if not p1:
-            p1 = item.get('team1') or item.get('home') or item.get('homeName')
-        if not p2:
-            p2 = item.get('team2') or item.get('away') or item.get('awayName')
-        
-        if not p1 or not p2:
-            return None
-        
-        # Torna és borítás
-        tournament = ''
-        surface = 'hard'
-        
-        if 'tournament' in item:
-            if isinstance(item['tournament'], dict):
-                tournament = item['tournament'].get('name', '')
-                surface = item['tournament'].get('surface', 'hard')
-            else:
-                tournament = str(item['tournament'])
-        
-        return {
-            'player1': str(p1).strip(),
-            'player2': str(p2).strip(),
-            'tournament': tournament or item.get('competition', '') or item.get('league', ''),
-            'surface': surface or item.get('surface', 'hard'),
-            'date': item.get('date') or item.get('startDate') or item.get('start', ''),
-            'time': item.get('time') or item.get('startTime', ''),
-            'round': item.get('round') or item.get('stage', ''),
-            'category': item.get('category') or item.get('type', ''),
-            'status': item.get('status') or item.get('state', ''),
-            'id': item.get('id') or item.get('eventId', '')
-        }
+    return 1.0 / (1.0 + math.exp(-x))
 
-# ============================================================================
-# STATISZTIKAI ELEMZŐ MOTOR
-# ============================================================================
 
-class StatisticalAnalyzer:
-    """Komplex statisztikai elemzések"""
-    
-    @staticmethod
-    def analyze_player_form(player_name: str, stats: Dict) -> Dict:
-        """Játékos formájának elemzése"""
-        ranking = stats.get('ranking') or stats.get('rank') or stats.get('position', 100)
-        
-        return {
-            'ranking': int(ranking) if ranking else 100,
-            'age': stats.get('age') or stats.get('birthDate', ''),
-            'country': stats.get('country') or stats.get('nationality', ''),
-            'height': stats.get('height') or stats.get('heightCm', ''),
-            'plays': stats.get('plays') or stats.get('hand', ''),
-            'titles': stats.get('titles') or stats.get('careerTitles', 0),
-            'win_pct_career': stats.get('winPercentage') or stats.get('winPct', 0),
-            'matches_played': stats.get('matchesPlayed') or stats.get('totalMatches', 0),
-        }
+# ============================================================
+# API CLIENT
+# ============================================================
 
-    @staticmethod
-    def analyze_surface_performance(stats: Dict, surface: str) -> Dict:
-        """Borítás-specifikus elemzés"""
-        surface_key = surface.lower() if surface else 'hard'
-        
-        return {
-            'surface': surface_key,
-            'win_pct': stats.get(f'{surface_key}WinPct') or 
-                      stats.get(f'winPct{surface_key.title()}') or
-                      stats.get('winPercentage', 50),
-            'matches_on_surface': stats.get(f'{surface_key}Matches') or 0,
-            'titles_on_surface': stats.get(f'{surface_key}Titles') or 0,
-            'best_result': stats.get(f'{surface_key}Best') or '',
-        }
+class TennisAPI:
 
-    @staticmethod
-    def analyze_serve_return(stats: Dict) -> Dict:
-        """Szerva és return elemzés"""
-        return {
-            'aces_per_match': stats.get('acesPerMatch') or stats.get('aces', 0),
-            'double_faults': stats.get('doubleFaultsPerMatch') or stats.get('doubleFaults', 0),
-            'first_serve_pct': stats.get('firstServePct') or stats.get('firstServe', 60),
-            'first_serve_won': stats.get('firstServeWonPct') or stats.get('firstServeWon', 65),
-            'second_serve_won': stats.get('secondServeWonPct') or stats.get('secondServeWon', 50),
-            'break_points_saved': stats.get('breakPointsSavedPct') or stats.get('bpsSaved', 55),
-            'service_games_won': stats.get('serviceGamesWonPct') or stats.get('serveGamesWon', 75),
-            'return_points_won': stats.get('returnPointsWonPct') or stats.get('returnPtsWon', 38),
-            'break_points_converted': stats.get('breakPointsConvertedPct') or stats.get('bpsConverted', 40),
-        }
-
-    @staticmethod
-    def analyze_recent_form(stats: Dict) -> Dict:
-        """Utolsó meccsek formája"""
-        return {
-            'last_5_won': stats.get('last5Won') or stats.get('recentWins', 0),
-            'last_5_lost': stats.get('last5Lost') or stats.get('recentLosses', 0),
-            'last_10_won': stats.get('last10Won') or stats.get('last10Wins', 0),
-            'win_streak': stats.get('winStreak') or stats.get('currentStreak', 0),
-            'loss_streak': stats.get('lossStreak') or 0,
-            'season_wins': stats.get('seasonWins') or stats.get('winsThisYear', 0),
-            'season_losses': stats.get('seasonLosses') or stats.get('lossesThisYear', 0),
-        }
-
-# ============================================================================
-# AI PREDIKCIÓS MOTOR
-# ============================================================================
-
-class AIPredictionEngine:
-    """Fejlett AI predikciós motor"""
-    
     def __init__(self):
-        self.fetcher = TennisDataFetcher()
-        self.analyzer = StatisticalAnalyzer()
-    
-    def predict(self, player1: str, player2: str, surface: str = 'hard', 
-                tournament: str = '', match_context: Dict = None) -> Dict:
-        """
-        Komplex AI predikció készítése
-        """
-        logger.info(f"🔍 Elemzés: {player1} vs {player2} ({surface})")
-        
-        # 1. Adatok begyűjtése API-ból
-        stats1 = self.fetcher.get_player_stats(player1)
-        stats2 = self.fetcher.get_player_stats(player2)
-        h2h_data = self.fetcher.get_h2h(player1, player2)
-        tournament_info = self.fetcher.get_tournament_info(tournament) if tournament else {}
-        
-        # 2. Statisztikai elemzés
-        analysis = {
-            'player1': {
-                'name': player1,
-                'form': self.analyzer.analyze_player_form(player1, stats1),
-                'surface': self.analyzer.analyze_surface_performance(stats1, surface),
-                'serve_return': self.analyzer.analyze_serve_return(stats1),
-                'recent': self.analyzer.analyze_recent_form(stats1),
-            },
-            'player2': {
-                'name': player2,
-                'form': self.analyzer.analyze_player_form(player2, stats2),
-                'surface': self.analyzer.analyze_surface_performance(stats2, surface),
-                'serve_return': self.analyzer.analyze_serve_return(stats2),
-                'recent': self.analyzer.analyze_recent_form(stats2),
-            },
-            'h2h': self._analyze_h2h(h2h_data, player1, player2),
-            'tournament': tournament_info,
-        }
-        
-        # 3. Feature-ök számítása
-        features = self._calculate_features(analysis, surface)
-        
-        # 4. Predikció
-        prediction = self._make_prediction(features, player1, player2)
-        
-        # 5. Kulcsfaktorok
-        key_factors = self._identify_key_factors(features, player1, player2)
-        
-        # 6. Fogadási elemzés
-        betting = self._generate_betting_analysis(prediction, features, player1, player2)
-        
-        # 7. Részletes szöveges elemzés
-        commentary = self._generate_commentary(analysis, prediction, key_factors)
-        
-        return {
-            'match': f"{player1} vs {player2}",
-            'tournament': tournament,
-            'surface': surface,
-            'datetime': match_context.get('date', '') if match_context else '',
-            'round': match_context.get('round', '') if match_context else '',
-            'status': match_context.get('status', '') if match_context else '',
-            
-            # AI Predikció
-            'ai_prediction': prediction,
-            
-            # Kulcsfaktorok
-            'key_factors': key_factors,
-            
-            # Részletes elemzés
-            'analysis': analysis,
-            
-            # Fogadási javaslatok
-            'betting_analysis': betting,
-            
-            # Szöveges kommentár
-            'commentary': commentary,
-            
-            # Meta adatok
-            'meta': {
-                'generated_at': datetime.now().isoformat(),
-                'data_source': 'api-tennis.p.rapidapi.com',
-                'version': '2.0.0',
-                'disclaimer': '⚠️ Ez AI elemzés, NEM befektetési tanács! A sportfogadás kockázattal jár!'
-            }
-        }
-    
-    def _analyze_h2h(self, h2h_data: Dict, p1: str, p2: str) -> Dict:
-        """H2H elemzés"""
-        if not h2h_data:
-            return {'total_matches': 0, 'note': 'Nincs korábbi mérkőzés'}
-        
-        total = h2h_data.get('totalMatches') or h2h_data.get('total', 0)
-        p1_wins = h2h_data.get('player1Wins') or h2h_data.get(f'{p1}Wins', 0)
-        p2_wins = h2h_data.get('player2Wins') or h2h_data.get(f'{p2}Wins', 0)
-        
-        return {
-            'total_matches': total,
-            f'{p1}_wins': p1_wins,
-            f'{p2}_wins': p2_wins,
-            'last_meeting': h2h_data.get('lastMeeting', ''),
-            'surface_breakdown': h2h_data.get('surfaceBreakdown', {}),
-        }
-    
-    def _calculate_features(self, analysis: Dict, surface: str) -> Dict:
-        """Feature engineering az AI-hoz"""
-        p1 = analysis['player1']
-        p2 = analysis['player2']
-        
-        features = {}
-        
-        # Ranking különbség
-        r1 = p1['form'].get('ranking', 100)
-        r2 = p2['form'].get('ranking', 100)
-        features['ranking_advantage'] = (r2 - r1) / max(r1, r2, 1) if r1 and r2 else 0
-        
-        # Borítás előny
-        s1 = p1['surface'].get('win_pct', 50)
-        s2 = p2['surface'].get('win_pct', 50)
-        features['surface_advantage'] = (s1 - s2) / 100
-        
-        # Szerva dominancia
-        p1_serve = (p1['serve_return'].get('first_serve_pct', 60) * 
-                   p1['serve_return'].get('first_serve_won', 65) / 10000)
-        p2_serve = (p2['serve_return'].get('first_serve_pct', 60) * 
-                   p2['serve_return'].get('first_serve_won', 65) / 10000)
-        features['serve_advantage'] = p1_serve - p2_serve
-        
-        # Return erő
-        features['return_advantage'] = (
-            p1['serve_return'].get('return_points_won', 38) -
-            p2['serve_return'].get('return_points_won', 38)
-        ) / 100
-        
-        # Forma
-        p1_form = p1['recent'].get('last_10_won', 5) / 10
-        p2_form = p2['recent'].get('last_10_won', 5) / 10
-        features['form_advantage'] = p1_form - p2_form
-        
-        # Break pontok
-        features['break_point_advantage'] = (
-            p1['serve_return'].get('break_points_converted', 40) -
-            p2['serve_return'].get('break_points_converted', 40)
-        ) / 100
-        
-        # H2H előny
-        h2h = analysis.get('h2h', {})
-        if h2h.get('total_matches', 0) > 0:
-            p1_h2h = h2h.get(f'{analysis["player1"]["name"]}_wins', 0)
-            total_h2h = h2h.get('total_matches', 1)
-            features['h2h_advantage'] = (p1_h2h / total_h2h - 0.5) * 2
-        else:
-            features['h2h_advantage'] = 0
-        
-        # Tapasztalat (címek alapján)
-        t1 = p1['form'].get('titles', 0)
-        t2 = p2['form'].get('titles', 0)
-        features['experience_advantage'] = (t1 - t2) / max(t1 + t2, 1) if (t1 + t2) > 0 else 0
-        
-        return features
-    
-    def _make_prediction(self, features: Dict, p1: str, p2: str) -> Dict:
-        """AI predikció készítése"""
-        
-        # Súlyozás
-        weights = {
-            'ranking_advantage': 0.18,
-            'surface_advantage': 0.22,
-            'serve_advantage': 0.15,
-            'return_advantage': 0.12,
-            'form_advantage': 0.13,
-            'break_point_advantage': 0.08,
-            'h2h_advantage': 0.07,
-            'experience_advantage': 0.05,
-        }
-        
-        # Súlyozott pontszám
-        weighted_score = sum(features.get(k, 0) * w for k, w in weights.items())
-        
-        # Valószínűség (szigmoid transzformáció)
-        probability = 1 / (1 + np.exp(-weighted_score * 8))
-        probability = max(0.02, min(0.98, probability))
-        
-        # Konfidencia
-        abs_sum = sum(abs(features.get(k, 0)) for k in weights)
-        confidence = 0.50 + abs_sum * 0.35
-        confidence = min(0.95, confidence)
-        
-        winner = p1 if probability > 0.5 else p2
-        win_prob = probability if probability > 0.5 else 1 - probability
-        
-        # Predikciós szintek
-        if win_prob > 0.75:
-            level = 'MAGAS BIZTONSÁGÚ'
-        elif win_prob > 0.60:
-            level = 'VALÓSZÍNŰ'
-        elif win_prob > 0.50:
-            level = 'ENYHE ELŐNY'
-        else:
-            level = 'BIZONYTALAN'
-        
-        return {
-            'predicted_winner': winner,
-            'win_probability': round(win_prob * 100, 1),
-            f'{p1}_win_pct': round(probability * 100, 1),
-            f'{p2}_win_pct': round((1 - probability) * 100, 1),
-            'confidence': round(confidence * 100, 1),
-            'confidence_level': level,
-        }
-    
-    def _identify_key_factors(self, features: Dict, p1: str, p2: str) -> List[Dict]:
-        """Kulcsfontosságú faktorok azonosítása"""
-        factor_names = {
-            'ranking_advantage': ('Világranglista előny', 'ranglistás helyezés'),
-            'surface_advantage': ('Borítás előny', 'borításon nyújtott teljesítmény'),
-            'serve_advantage': ('Szerva dominancia', 'szervajáték erőssége'),
-            'return_advantage': ('Return hatékonyság', 'fogadójáték minősége'),
-            'form_advantage': ('Jelenlegi forma', 'utolsó 10 meccs eredménye'),
-            'break_point_advantage': ('Break pont kihasználás', 'fontos pontok megnyerése'),
-            'h2h_advantage': ('Egymás elleni mérleg', 'korábbi mérkőzések'),
-            'experience_advantage': ('Tapasztalat', 'megnyert tornák száma'),
-        }
-        
-        factors = []
-        for key, value in sorted(features.items(), key=lambda x: abs(x[1]), reverse=True):
-            if abs(value) > 0.01:
-                name, detail = factor_names.get(key, (key, ''))
-                advantage = p1 if value > 0 else p2
-                factors.append({
-                    'factor': name,
-                    'detail': detail,
-                    'advantage_for': advantage,
-                    'impact': round(abs(value) * 100, 1),
-                    'description': f'{name}: {advantage} javára ({abs(value)*100:.0f}% előny)'
-                })
-        
-        return factors[:5]
-    
-    def _generate_betting_analysis(self, prediction: Dict, features: Dict, 
-                                   p1: str, p2: str) -> Dict:
-        """Fogadási elemzés"""
-        win_prob = prediction['win_probability'] / 100
-        confidence = prediction['confidence'] / 100
-        
-        tips = []
-        
-        # Match winner tipp
-        if win_prob > 0.55:
-            fair_odds = round(1 / win_prob, 2)
-            tips.append({
-                'market': 'Mérkőzés győztese',
-                'selection': prediction['predicted_winner'],
-                'probability': f"{win_prob:.1%}",
-                'fair_odds': fair_odds,
-                'value_bet': 'IGEN' if win_prob > 0.60 else 'TALÁN',
-                'confidence': 'MAGAS' if confidence > 0.70 else 'KÖZEPES',
-                'stake_suggestion': f"Tét: {max(1, int(win_prob * 10))}/10 egység"
-            })
-        
-        # Set fogadás
-        if win_prob > 0.60:
-            tips.append({
-                'market': 'Szett hendikep',
-                'selection': f"{prediction['predicted_winner']} -1.5 szett",
-                'confidence': 'KÖZEPES',
-            })
-        
-        # Over/Under
-        serve_sum = features.get('serve_advantage', 0)
-        if serve_sum > 0.05:
-            tips.append({
-                'market': 'Játékok száma',
-                'selection': 'OVER 22.5',
-                'confidence': 'ALACSONY-KÖZEPES',
-            })
-        elif serve_sum < -0.02:
-            tips.append({
-                'market': 'Játékok száma',
-                'selection': 'UNDER 22.5',
-                'confidence': 'ALACSONY-KÖZEPES',
-            })
-        
-        return {
-            'recommended_bets': tips,
-            'kelly_criterion': round((win_prob * 2 - 1) * 100, 1) if win_prob > 0.5 else 0,
-            'risk_level': 'ALACSONY' if win_prob > 0.70 else 'KÖZEPES' if win_prob > 0.55 else 'MAGAS',
-        }
-    
-    def _generate_commentary(self, analysis: Dict, prediction: Dict, 
-                            factors: List[Dict]) -> str:
-        """Szöveges elemzés"""
-        p1 = analysis['player1']['name']
-        p2 = analysis['player2']['name']
-        winner = prediction['predicted_winner']
-        
-        lines = []
-        lines.append(f"📊 RÉSZLETES ELEMZÉS: {p1} vs {p2}")
-        lines.append("")
-        
-        # Predikció összefoglaló
-        lines.append(f"🏆 PREDIKCIÓ: {winner} nyer {prediction['win_probability']}% eséllyel")
-        lines.append(f"💪 Konfidencia: {prediction['confidence']}% ({prediction['confidence_level']})")
-        lines.append("")
-        
-        # Kulcsfaktorok
-        if factors:
-            lines.append("🔑 KULCSFAKTOROK:")
-            for f in factors[:3]:
-                lines.append(f"   • {f['description']}")
-            lines.append("")
-        
-        # Játékos elemzés
-        p1_surface = analysis['player1']['surface'].get('win_pct', 'N/A')
-        p2_surface = analysis['player2']['surface'].get('win_pct', 'N/A')
-        
-        lines.append(f"👤 {p1}:")
-        lines.append(f"   • Ranglista: {analysis['player1']['form'].get('ranking', 'N/A')}")
-        lines.append(f"   • Borítás nyerési arány: {p1_surface}%")
-        if analysis['player1']['recent'].get('last_10_won'):
-            lines.append(f"   • Utolsó 10 meccs: {analysis['player1']['recent'].get('last_10_won')}W/"
-                       f"{analysis['player1']['recent'].get('last_5_lost', 0)}L")
-        lines.append("")
-        
-        lines.append(f"👤 {p2}:")
-        lines.append(f"   • Ranglista: {analysis['player2']['form'].get('ranking', 'N/A')}")
-        lines.append(f"   • Borítás nyerési arány: {p2_surface}%")
-        if analysis['player2']['recent'].get('last_10_won'):
-            lines.append(f"   • Utolsó 10 meccs: {analysis['player2']['recent'].get('last_10_won')}W/"
-                       f"{analysis['player2']['recent'].get('last_5_lost', 0)}L")
-        lines.append("")
-        
-        # H2H
-        h2h = analysis.get('h2h', {})
-        if h2h.get('total_matches', 0) > 0:
-            lines.append(f"🤝 EGYMÁS ELLEN: {h2h.get(f'{p1}_wins', 0)}-{h2h.get(f'{p2}_wins', 0)}")
-            lines.append("")
-        
-        lines.append("⚠️ FIGYELMEZTETÉS: Ez AI által generált elemzés, nem minősül befektetési tanácsnak.")
-        
-        return '\n'.join(lines)
+        if not API_KEY:
+            raise RuntimeError(
+                "\n"
+                "❌ NINCS API KULCS!\n\n"
+                "Állítsd be ezt a környezeti változót:\n"
+                "API_TENNIS_KEY\n\n"
+                "GitHub Actions esetén:\n"
+                "Settings → Secrets and variables → Actions\n"
+                "→ New repository secret\n"
+                "Name: API_TENNIS_KEY\n"
+            )
 
-# ============================================================================
-# FŐ PROGRAM
-# ============================================================================
+        self.session = requests.Session()
+
+    # --------------------------------------------------------
+    # ALAP API REQUEST
+    # --------------------------------------------------------
+
+    def request(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+
+        query = {
+            "method": method,
+            "APIkey": API_KEY
+        }
+
+        if params:
+            for key, value in params.items():
+                if value is not None and value != "":
+                    query[key] = value
+
+        try:
+
+            response = self.session.get(
+                BASE_URL,
+                params=query,
+                timeout=REQUEST_TIMEOUT
+            )
+
+        except requests.exceptions.Timeout:
+            logger.error("❌ API timeout: %s", method)
+            return None
+
+        except requests.exceptions.RequestException as exc:
+            logger.error("❌ API kapcsolat hiba: %s", exc)
+            return None
+
+        if response.status_code != 200:
+
+            logger.error(
+                "❌ HTTP %s: %s",
+                response.status_code,
+                response.text[:300]
+            )
+
+            return None
+
+        try:
+            data = response.json()
+        except ValueError:
+            logger.error("❌ Az API nem JSON választ adott.")
+            return None
+
+        if not isinstance(data, dict):
+            logger.error("❌ Érvénytelen API válasz.")
+            return None
+
+        if data.get("success") != 1:
+
+            logger.error(
+                "❌ API hiba: %s",
+                data.get("error") or data.get("message") or data
+            )
+
+            return None
+
+        return data
+
+    # --------------------------------------------------------
+    # FIXTURES
+    # --------------------------------------------------------
+
+    def get_fixtures(
+        self,
+        date_start: str,
+        date_stop: Optional[str] = None,
+        match_key: Optional[str] = None,
+        player_key: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+
+        if date_stop is None:
+            date_stop = date_start
+
+        data = self.request(
+            "get_fixtures",
+            {
+                "date_start": date_start,
+                "date_stop": date_stop,
+                "match_key": match_key,
+                "player_key": player_key,
+                "timezone": TIMEZONE
+            }
+        )
+
+        if not data:
+            return []
+
+        result = data.get("result", [])
+
+        if isinstance(result, list):
+            return result
+
+        return []
+
+    # --------------------------------------------------------
+    # LIVE
+    # --------------------------------------------------------
+
+    def get_livescore(self) -> List[Dict[str, Any]]:
+
+        data = self.request(
+            "get_livescore",
+            {
+                "timezone": TIMEZONE
+            }
+        )
+
+        if not data:
+            return []
+
+        result = data.get("result", [])
+
+        return result if isinstance(result, list) else []
+
+    # --------------------------------------------------------
+    # H2H
+    # --------------------------------------------------------
+
+    def get_h2h(
+        self,
+        player1_key: str,
+        player2_key: str
+    ) -> Dict[str, Any]:
+
+        data = self.request(
+            "get_H2H",
+            {
+                "first_player_key": player1_key,
+                "second_player_key": player2_key
+            }
+        )
+
+        if not data:
+            return {}
+
+        result = data.get("result", {})
+
+        return result if isinstance(result, dict) else {}
+
+    # --------------------------------------------------------
+    # PLAYER
+    # --------------------------------------------------------
+
+    def get_player(
+        self,
+        player_key: str
+    ) -> Optional[Dict[str, Any]]:
+
+        data = self.request(
+            "get_players",
+            {
+                "player_key": player_key
+            }
+        )
+
+        if not data:
+            return None
+
+        result = data.get("result", [])
+
+        if isinstance(result, list) and result:
+            return result[0]
+
+        return None
+
+    # --------------------------------------------------------
+    # STANDINGS
+    # --------------------------------------------------------
+
+    def get_standings(
+        self,
+        tour: str
+    ) -> List[Dict[str, Any]]:
+
+        data = self.request(
+            "get_standings",
+            {
+                "event_type": tour.upper()
+            }
+        )
+
+        if not data:
+            return []
+
+        result = data.get("result", [])
+
+        return result if isinstance(result, list) else []
+
+    # --------------------------------------------------------
+    # ODDS
+    # --------------------------------------------------------
+
+    def get_odds(
+        self,
+        match_key: str
+    ) -> Dict[str, Any]:
+
+        data = self.request(
+            "get_odds",
+            {
+                "match_key": match_key
+            }
+        )
+
+        if not data:
+            return {}
+
+        result = data.get("result", {})
+
+        return result if isinstance(result, dict) else {}
+
+    # --------------------------------------------------------
+    # EVENTS
+    # --------------------------------------------------------
+
+    def get_events(self) -> List[Dict[str, Any]]:
+
+        data = self.request("get_events")
+
+        if not data:
+            return []
+
+        result = data.get("result", [])
+
+        return result if isinstance(result, list) else []
+
+    # --------------------------------------------------------
+    # TOURNAMENTS
+    # --------------------------------------------------------
+
+    def get_tournaments(self) -> List[Dict[str, Any]]:
+
+        data = self.request("get_tournaments")
+
+        if not data:
+            return []
+
+        result = data.get("result", [])
+
+        return result if isinstance(result, list) else []
+
+
+# ============================================================
+# MATCH NORMALIZER
+# ============================================================
+
+class MatchNormalizer:
+
+    @staticmethod
+    def normalize(match: Dict[str, Any]) -> Dict[str, Any]:
+
+        return {
+            "match_key": str(
+                match.get("event_key", "")
+            ),
+
+            "player1": str(
+                match.get("event_first_player", "")
+            ).strip(),
+
+            "player1_key": str(
+                match.get("first_player_key", "")
+            ),
+
+            "player2": str(
+                match.get("event_second_player", "")
+            ).strip(),
+
+            "player2_key": str(
+                match.get("second_player_key", "")
+            ),
+
+            "date": match.get("event_date", ""),
+
+            "time": match.get("event_time", ""),
+
+            "status": match.get("event_status", ""),
+
+            "winner": match.get("event_winner"),
+
+            "final_result": match.get(
+                "event_final_result",
+                ""
+            ),
+
+            "game_result": match.get(
+                "event_game_result",
+                ""
+            ),
+
+            "live": str(
+                match.get("event_live", "0")
+            ) == "1",
+
+            "tournament": match.get(
+                "tournament_name",
+                ""
+            ),
+
+            "tournament_key": str(
+                match.get("tournament_key", "")
+            ),
+
+            "round": match.get(
+                "tournament_round",
+                ""
+            ),
+
+            "season": match.get(
+                "tournament_season",
+                ""
+            ),
+
+            "event_type": match.get(
+                "event_type_type",
+                ""
+            ),
+
+            "scores": match.get(
+                "scores",
+                []
+            ) or [],
+
+            "statistics": match.get(
+                "statistics",
+                []
+            ) or [],
+
+            "pointbypoint": match.get(
+                "pointbypoint",
+                []
+            ) or []
+        }
+
+    # --------------------------------------------------------
+
+    @staticmethod
+    def surface_from_tournament(
+        tournament: str
+    ) -> str:
+
+        text = tournament.lower()
+
+        if "clay" in text:
+            return "clay"
+
+        if "grass" in text:
+            return "grass"
+
+        return "hard"
+
+
+# ============================================================
+# STATISTICS PARSER
+# ============================================================
+
+class StatisticsParser:
+
+    @staticmethod
+    def parse(
+        match: Dict[str, Any]
+    ) -> Dict[str, Dict[str, float]]:
+
+        result = {
+            "player1": {},
+            "player2": {}
+        }
+
+        p1_key = str(match.get("player1_key"))
+        p2_key = str(match.get("player2_key"))
+
+        stats = match.get("statistics", [])
+
+        if not isinstance(stats, list):
+            return result
+
+        for stat in stats:
+
+            if not isinstance(stat, dict):
+                continue
+
+            player_key = str(
+                stat.get("player_key", "")
+            )
+
+            if player_key == p1_key:
+                target = result["player1"]
+
+            elif player_key == p2_key:
+                target = result["player2"]
+
+            else:
+                continue
+
+            name = str(
+                stat.get("stat_name", "")
+            ).lower().strip()
+
+            value = safe_float(
+                stat.get("stat_value")
+            )
+
+            if value is None:
+                continue
+
+            if "ace" in name:
+                target["aces"] = value
+
+            elif "double fault" in name:
+                target["double_faults"] = value
+
+            elif "1st serve points won" in name:
+                target["first_serve_points_won"] = value
+
+            elif "2nd serve points won" in name:
+                target["second_serve_points_won"] = value
+
+            elif "break points won" in name:
+                target["break_points_won"] = value
+
+            elif "break points converted" in name:
+                target["break_points_converted"] = value
+
+            elif "service games won" in name:
+                target["service_games_won"] = value
+
+            elif "return points won" in name:
+                target["return_points_won"] = value
+
+            elif "1st serve" in name and "%" in name:
+                target["first_serve_pct"] = value
+
+        return result
+
+
+# ============================================================
+# HISTORIKUS FORMA
+# ============================================================
+
+class FormAnalyzer:
+
+    def __init__(self, api: TennisAPI):
+        self.api = api
+
+    # --------------------------------------------------------
+
+    def get_recent_matches(
+        self,
+        player_key: str,
+        days: int = 120
+    ) -> List[Dict[str, Any]]:
+
+        end = datetime.now()
+        start = end - timedelta(days=days)
+
+        fixtures = self.api.get_fixtures(
+            start.strftime("%Y-%m-%d"),
+            end.strftime("%Y-%m-%d"),
+            player_key=player_key
+        )
+
+        finished = []
+
+        for raw in fixtures:
+
+            match = MatchNormalizer.normalize(raw)
+
+            if match["status"].lower() != "finished":
+                continue
+
+            if not match["winner"]:
+                continue
+
+            finished.append(match)
+
+        finished.sort(
+            key=lambda x: (
+                x["date"],
+                x["time"]
+            ),
+            reverse=True
+        )
+
+        return finished[:FORM_MATCH_LIMIT]
+
+    # --------------------------------------------------------
+
+    def analyze(
+        self,
+        player_key: str,
+        player_name: str,
+        surface: str
+    ) -> Dict[str, Any]:
+
+        matches = self.get_recent_matches(player_key)
+
+        total = len(matches)
+        wins = 0
+        losses = 0
+
+        surface_total = 0
+        surface_wins = 0
+
+        sets_won = 0
+        sets_lost = 0
+
+        recent_opponents = []
+
+        for match in matches:
+
+            is_player1 = (
+                str(match["player1_key"]) == str(player_key)
+            )
+
+            winner = match["winner"]
+
+            won = (
+                (is_player1 and winner == "First Player")
+                or
+                (not is_player1 and winner == "Second Player")
+            )
+
+            if won:
+                wins += 1
+            else:
+                losses += 1
+
+            opponent = (
+                match["player2"]
+                if is_player1
+                else match["player1"]
+            )
+
+            recent_opponents.append(opponent)
+
+            match_surface = MatchNormalizer.surface_from_tournament(
+                match["tournament"]
+            )
+
+            if match_surface == surface:
+                surface_total += 1
+
+                if won:
+                    surface_wins += 1
+
+            # Szettek
+            for score in match["scores"]:
+
+                if not isinstance(score, dict):
+                    continue
+
+                s1 = safe_int(
+                    score.get("score_first")
+                )
+
+                s2 = safe_int(
+                    score.get("score_second")
+                )
+
+                if s1 is None or s2 is None:
+                    continue
+
+                if is_player1:
+
+                    if s1 > s2:
+                        sets_won += 1
+                    elif s2 > s1:
+                        sets_lost += 1
+
+                else:
+
+                    if s2 > s1:
+                        sets_won += 1
+                    elif s1 > s2:
+                        sets_lost += 1
+
+        win_pct = (
+            wins / total * 100
+            if total
+            else None
+        )
+
+        surface_pct = (
+            surface_wins / surface_total * 100
+            if surface_total
+            else None
+        )
+
+        return {
+            "player": player_name,
+            "player_key": str(player_key),
+            "matches": total,
+            "wins": wins,
+            "losses": losses,
+            "win_pct": win_pct,
+            "surface_matches": surface_total,
+            "surface_wins": surface_wins,
+            "surface_win_pct": surface_pct,
+            "sets_won": sets_won,
+            "sets_lost": sets_lost,
+            "recent_opponents": recent_opponents
+        }
+
+
+# ============================================================
+# RANKING
+# ============================================================
+
+class RankingAnalyzer:
+
+    def __init__(self, api: TennisAPI):
+        self.api = api
+
+    def find_player_rank(
+        self,
+        player_key: str,
+        tour: str
+    ) -> Optional[int]:
+
+        standings = self.api.get_standings(tour)
+
+        for item in standings:
+
+            if str(item.get("player_key")) == str(player_key):
+
+                return safe_int(
+                    item.get("place")
+                )
+
+        return None
+
+
+# ============================================================
+# H2H ANALYZER
+# ============================================================
+
+class H2HAnalyzer:
+
+    @staticmethod
+    def analyze(
+        h2h: Dict[str, Any],
+        player1_key: str,
+        player2_key: str,
+        surface: str
+    ) -> Dict[str, Any]:
+
+        meetings = h2h.get("H2H", [])
+
+        if not isinstance(meetings, list):
+            meetings = []
+
+        p1_wins = 0
+        p2_wins = 0
+
+        surface_meetings = 0
+        surface_p1_wins = 0
+
+        for match in meetings:
+
+            winner = match.get("event_winner")
+
+            first_key = str(
+                match.get("first_player_key", "")
+            )
+
+            second_key = str(
+                match.get("second_player_key", "")
+            )
+
+            if winner == "First Player":
+                winner_key = first_key
+
+            elif winner == "Second Player":
+                winner_key = second_key
+
+            else:
+                continue
+
+            if winner_key == str(player1_key):
+                p1_wins += 1
+
+            elif winner_key == str(player2_key):
+                p2_wins += 1
+
+            tournament = str(
+                match.get("tournament_name", "")
+            )
+
+            match_surface = MatchNormalizer.surface_from_tournament(
+                tournament
+            )
+
+            if match_surface == surface:
+
+                surface_meetings += 1
+
+                if winner_key == str(player1_key):
+                    surface_p1_wins += 1
+
+        total = p1_wins + p2_wins
+
+        return {
+            "total": total,
+            "player1_wins": p1_wins,
+            "player2_wins": p2_wins,
+            "surface_total": surface_meetings,
+            "surface_player1_wins": surface_p1_wins
+        }
+
+
+# ============================================================
+# PREDICTION ENGINE
+# ============================================================
+
+class PredictionEngine:
+
+    def __init__(self, api: TennisAPI):
+
+        self.api = api
+
+        self.form = FormAnalyzer(api)
+
+        self.rankings = RankingAnalyzer(api)
+
+    # --------------------------------------------------------
+
+    def _ranking_score(
+        self,
+        rank1: Optional[int],
+        rank2: Optional[int]
+    ) -> float:
+
+        if rank1 is None or rank2 is None:
+            return 0.0
+
+        # Logaritmikus különbség.
+        # 1 vs 10 ne legyen 10x erősebb,
+        # de legyen jelentős különbség.
+        value = math.log(rank2 + 1) - math.log(rank1 + 1)
+
+        return clamp(value / 3.0, -1.0, 1.0)
+
+    # --------------------------------------------------------
+
+    def _form_score(
+        self,
+        form1: Dict[str, Any],
+        form2: Dict[str, Any]
+    ) -> float:
+
+        w1 = form1.get("win_pct")
+        w2 = form2.get("win_pct")
+
+        if w1 is None or w2 is None:
+            return 0.0
+
+        return clamp(
+            (w1 - w2) / 100.0,
+            -1.0,
+            1.0
+        )
+
+    # --------------------------------------------------------
+
+    def _surface_score(
+        self,
+        form1: Dict[str, Any],
+        form2: Dict[str, Any]
+    ) -> float:
+
+        s1 = form1.get("surface_win_pct")
+        s2 = form2.get("surface_win_pct")
+
+        if s1 is None or s2 is None:
+            return 0.0
+
+        return clamp(
+            (s1 - s2) / 100.0,
+            -1.0,
+            1.0
+        )
+
+    # --------------------------------------------------------
+
+    def _h2h_score(
+        self,
+        h2h: Dict[str, Any]
+    ) -> float:
+
+        total = h2h.get("total", 0)
+
+        if total <= 0:
+            return 0.0
+
+        return clamp(
+            (
+                h2h["player1_wins"] / total
+            ) - 0.5,
+            -0.5,
+            0.5
+        ) * 2
+
+    # --------------------------------------------------------
+
+    def _player_stats_score(
+        self,
+        stats1: Dict[str, float],
+        stats2: Dict[str, float]
+    ) -> float:
+
+        components = []
+
+        keys = [
+            "aces",
+            "first_serve_points_won",
+            "second_serve_points_won",
+            "return_points_won",
+            "break_points_converted",
+            "service_games_won"
+        ]
+
+        for key in keys:
+
+            v1 = stats1.get(key)
+            v2 = stats2.get(key)
+
+            if v1 is None or v2 is None:
+                continue
+
+            difference = (
+                v1 - v2
+            ) / 100.0
+
+            components.append(difference)
+
+        if not components:
+            return 0.0
+
+        return clamp(
+            sum(components) / len(components),
+            -1.0,
+            1.0
+        )
+
+    # --------------------------------------------------------
+
+    def predict(
+        self,
+        match: Dict[str, Any]
+    ) -> Dict[str, Any]:
+
+        player1 = match["player1"]
+        player2 = match["player2"]
+
+        player1_key = match["player1_key"]
+        player2_key = match["player2_key"]
+
+        surface = MatchNormalizer.surface_from_tournament(
+            match["tournament"]
+        )
+
+        logger.info(
+            "🔎 %s vs %s | %s | %s",
+            player1,
+            player2,
+            match["tournament"],
+            surface
+        )
+
+        # ----------------------------------------------------
+        # FORMA
+        # ----------------------------------------------------
+
+        form1 = self.form.analyze(
+            player1_key,
+            player1,
+            surface
+        )
+
+        form2 = self.form.analyze(
+            player2_key,
+            player2,
+            surface
+        )
+
+        # ----------------------------------------------------
+        # RANKING
+        # ----------------------------------------------------
+
+        tour = (
+            "WTA"
+            if "Women" in match["event_type"]
+            else "ATP"
+        )
+
+        rank1 = self.rankings.find_player_rank(
+            player1_key,
+            tour
+        )
+
+        rank2 = self.rankings.find_player_rank(
+            player2_key,
+            tour
+        )
+
+        # ----------------------------------------------------
+        # H2H
+        # ----------------------------------------------------
+
+        h2h_raw = self.api.get_h2h(
+            player1_key,
+            player2_key
+        )
+
+        h2h = H2HAnalyzer.analyze(
+            h2h_raw,
+            player1_key,
+            player2_key,
+            surface
+        )
+
+        # ----------------------------------------------------
+        # CURRENT MATCH STATISTICS
+        # ----------------------------------------------------
+
+        current_stats = StatisticsParser.parse(match)
+
+        stats1 = current_stats["player1"]
+        stats2 = current_stats["player2"]
+
+        # ----------------------------------------------------
+        # FEATURES
+        # ----------------------------------------------------
+
+        ranking_score = self._ranking_score(
+            rank1,
+            rank2
+        )
+
+        form_score = self._form_score(
+            form1,
+            form2
+        )
+
+        surface_score = self._surface_score(
+            form1,
+            form2
+        )
+
+        h2h_score = self._h2h_score(h2h)
+
+        stats_score = self._player_stats_score(
+            stats1,
+            stats2
+        )
+
+        # ----------------------------------------------------
+        # DATA QUALITY
+        # ----------------------------------------------------
+
+        available_features = 0
+        total_features = 5
+
+        for value in [
+            ranking_score,
+            form_score,
+            surface_score,
+            h2h_score,
+            stats_score
+        ]:
+
+            if value != 0:
+                available_features += 1
+
+        data_quality = (
+            available_features / total_features
+        )
+
+        # ----------------------------------------------------
+        # WEIGHTS
+        # ----------------------------------------------------
+
+        # Ranking
+        weighted_score = (
+            ranking_score * 0.28
+            +
+            form_score * 0.27
+            +
+            surface_score * 0.23
+            +
+            h2h_score * 0.10
+            +
+            stats_score * 0.12
+        )
+
+        # ----------------------------------------------------
+        # PROBABILITY
+        # ----------------------------------------------------
+
+        probability = sigmoid(
+            weighted_score * 4.2
+        )
+
+        probability = clamp(
+            probability,
+            0.03,
+            0.97
+        )
+
+        p1_probability = probability
+        p2_probability = 1.0 - probability
+
+        if p1_probability >= p2_probability:
+
+            winner = player1
+            winner_probability = p1_probability
+
+        else:
+
+            winner = player2
+            winner_probability = p2_probability
+
+        # ----------------------------------------------------
+        # CONFIDENCE
+        # ----------------------------------------------------
+
+        # Nem állítjuk, hogy a confidence a találati esély.
+        # Azt mutatja, mennyi használható adat állt rendelkezésre.
+
+        confidence = clamp(
+            0.45 + data_quality * 0.50,
+            0.45,
+            0.95
+        )
+
+        if winner_probability >= 0.70:
+            level = "ERŐS ELŐNY"
+
+        elif winner_probability >= 0.60:
+            level = "ELŐNY"
+
+        elif winner_probability >= 0.55:
+            level = "ENYHE ELŐNY"
+
+        else:
+            level = "KIEGYENLÍTETT"
+
+        # ----------------------------------------------------
+        # FAIR ODDS
+        # ----------------------------------------------------
+
+        fair_odds = (
+            1.0 / winner_probability
+        )
+
+        # ----------------------------------------------------
+        # RESULT
+        # ----------------------------------------------------
+
+        return {
+
+            "match": {
+                "match_key": match["match_key"],
+                "player1": player1,
+                "player2": player2,
+                "player1_key": player1_key,
+                "player2_key": player2_key,
+                "tournament": match["tournament"],
+                "round": match["round"],
+                "surface": surface,
+                "date": match["date"],
+                "time": match["time"],
+                "status": match["status"]
+            },
+
+            "prediction": {
+
+                "winner": winner,
+
+                "player1_probability": round(
+                    p1_probability * 100,
+                    2
+                ),
+
+                "player2_probability": round(
+                    p2_probability * 100,
+                    2
+                ),
+
+                "winner_probability": round(
+                    winner_probability * 100,
+                    2
+                ),
+
+                "fair_odds": round(
+                    fair_odds,
+                    3
+                ),
+
+                "level": level,
+
+                "confidence": round(
+                    confidence * 100,
+                    1
+                )
+            },
+
+            "features": {
+
+                "ranking": {
+                    "player1": rank1,
+                    "player2": rank2,
+                    "score": round(
+                        ranking_score,
+                        4
+                    )
+                },
+
+                "recent_form": {
+                    "player1": form1,
+                    "player2": form2,
+                    "score": round(
+                        form_score,
+                        4
+                    )
+                },
+
+                "surface_form": {
+                    "surface": surface,
+                    "player1": form1.get(
+                        "surface_win_pct"
+                    ),
+                    "player2": form2.get(
+                        "surface_win_pct"
+                    ),
+                    "score": round(
+                        surface_score,
+                        4
+                    )
+                },
+
+                "h2h": h2h,
+
+                "statistics": {
+                    "player1": stats1,
+                    "player2": stats2,
+                    "score": round(
+                        stats_score,
+                        4
+                    )
+                }
+            },
+
+            "data_quality": round(
+                data_quality * 100,
+                1
+            ),
+
+            "generated_at": datetime.now().isoformat()
+        }
+
+
+# ============================================================
+# ODDS ANALYSIS
+# ============================================================
+
+class OddsAnalyzer:
+
+    @staticmethod
+    def find_best_match_winner_odds(
+        odds_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+
+        result = {}
+
+        if not isinstance(odds_data, dict):
+            return result
+
+        for match_id, markets in odds_data.items():
+
+            if not isinstance(markets, dict):
+                continue
+
+            market = markets.get("Home/Away")
+
+            if not isinstance(market, dict):
+                continue
+
+            home = market.get("Home", {})
+            away = market.get("Away", {})
+
+            if isinstance(home, dict):
+
+                values = []
+
+                for bookmaker, value in home.items():
+
+                    odd = safe_float(value)
+
+                    if odd and odd > 1:
+                        values.append(
+                            (bookmaker, odd)
+                        )
+
+                if values:
+                    result["player1"] = max(
+                        values,
+                        key=lambda x: x[1]
+                    )
+
+            if isinstance(away, dict):
+
+                values = []
+
+                for bookmaker, value in away.items():
+
+                    odd = safe_float(value)
+
+                    if odd and odd > 1:
+                        values.append(
+                            (bookmaker, odd)
+                        )
+
+                if values:
+                    result["player2"] = max(
+                        values,
+                        key=lambda x: x[1]
+                    )
+
+        return result
+
+
+# ============================================================
+# PRINT
+# ============================================================
+
+def print_prediction(result: Dict[str, Any]):
+
+    match = result["match"]
+    prediction = result["prediction"]
+
+    print()
+    print("=" * 78)
+    print("🎾 TENNIS AI ANALYST PRO")
+    print("=" * 78)
+
+    print(
+        f"\n🏟️ {match['player1']} vs {match['player2']}"
+    )
+
+    print(
+        f"🏆 {match['tournament']}"
+    )
+
+    if match["round"]:
+        print(
+            f"🔄 Forduló: {match['round']}"
+        )
+
+    print(
+        f"🎾 Borítás: {match['surface']}"
+    )
+
+    print(
+        f"📅 {match['date']} {match['time']}"
+    )
+
+    print()
+    print("🧠 PREDIKCIÓ")
+    print("-" * 78)
+
+    print(
+        f"🏆 Várható győztes: "
+        f"{prediction['winner']}"
+    )
+
+    print(
+        f"📊 {match['player1']}: "
+        f"{prediction['player1_probability']:.2f}%"
+    )
+
+    print(
+        f"📊 {match['player2']}: "
+        f"{prediction['player2_probability']:.2f}%"
+    )
+
+    print(
+        f"🎯 Modell valószínűség: "
+        f"{prediction['winner_probability']:.2f}%"
+    )
+
+    print(
+        f"💰 Fair odds: "
+        f"{prediction['fair_odds']:.3f}"
+    )
+
+    print(
+        f"📈 Szint: "
+        f"{prediction['level']}"
+    )
+
+    print(
+        f"🔎 Adatminőség: "
+        f"{result['data_quality']:.1f}%"
+    )
+
+    print(
+        f"📌 Modell confidence: "
+        f"{prediction['confidence']:.1f}%"
+    )
+
+    print()
+    print("📋 RÉSZLETES ADATOK")
+    print("-" * 78)
+
+    features = result["features"]
+
+    ranking = features["ranking"]
+
+    print(
+        f"🌍 Ranking: "
+        f"{match['player1']} = "
+        f"{ranking['player1'] or 'N/A'} | "
+        f"{match['player2']} = "
+        f"{ranking['player2'] or 'N/A'}"
+    )
+
+    form = features["recent_form"]
+
+    print(
+        f"🔥 Forma: "
+        f"{form['player1']['wins']}-"
+        f"{form['player1']['losses']} | "
+        f"{form['player2']['wins']}-"
+        f"{form['player2']['losses']}"
+    )
+
+    surface = features["surface_form"]
+
+    print(
+        f"🎾 {surface['surface']} forma: "
+        f"{surface['player1'] if surface['player1'] is not None else 'N/A'}% | "
+        f"{surface['player2'] if surface['player2'] is not None else 'N/A'}%"
+    )
+
+    h2h = features["h2h"]
+
+    print(
+        f"🤝 H2H: "
+        f"{h2h['player1_wins']}-"
+        f"{h2h['player2_wins']}"
+    )
+
+    if h2h["surface_total"]:
+
+        print(
+            f"🤝 H2H {surface['surface']}: "
+            f"{h2h['surface_player1_wins']}/"
+            f"{h2h['surface_total']}"
+        )
+
+    print()
+    print(
+        "⚠️ FONTOS: A százalék modellbecslés, "
+        "nem garantált eredmény."
+    )
+
+    print("=" * 78)
+
+
+# ============================================================
+# SAVE JSON
+# ============================================================
+
+def save_json(
+    filename: str,
+    data: Any
+):
+
+    path = os.path.join(
+        RESULTS_DIR,
+        filename
+    )
+
+    with open(
+        path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            data,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    logger.info(
+        "💾 Mentve: %s",
+        path
+    )
+
+
+# ============================================================
+# FIND MATCH
+# ============================================================
+
+def find_match(
+    matches: List[Dict[str, Any]],
+    search: str
+) -> Optional[Dict[str, Any]]:
+
+    search_normalized = normalize_name(
+        search
+    )
+
+    if " vs " in search_normalized:
+
+        p1, p2 = search_normalized.split(
+            " vs ",
+            1
+        )
+
+    elif " - " in search_normalized:
+
+        p1, p2 = search_normalized.split(
+            " - ",
+            1
+        )
+
+    else:
+
+        return None
+
+    for match in matches:
+
+        a = normalize_name(
+            match["player1"]
+        )
+
+        b = normalize_name(
+            match["player2"]
+        )
+
+        if (
+            (p1 in a and p2 in b)
+            or
+            (p2 in a and p1 in b)
+        ):
+
+            return match
+
+    return None
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='🎾 Tennis AI Analyst PRO')
-    parser.add_argument('--today', action='store_true', help='MAI mérkőzések')
-    parser.add_argument('--live', action='store_true', help='ÉLŐ mérkőzések')
-    parser.add_argument('--date', type=str, help='Adott dátum (YYYY-MM-DD)')
-    parser.add_argument('--match', type=str, help='Egy mérkőzés: "Játékos1 vs Játékos2"')
-    parser.add_argument('--surface', type=str, default='hard', help='Borítás')
-    parser.add_argument('--output', type=str, choices=['json', 'text', 'full'], default='full')
-    
-    args = parser.parse_args()
-    
-    # API kulcs ellenőrzése
-    if not API_KEY:
-        print("="*60)
-        print("❌ HIBA: Nincs API kulcs!")
-        print("="*60)
-        print("\nÁllítsd be a RAPIDAPI_KEY környezeti változót:")
-        print("  export RAPIDAPI_KEY='a_te_kulcsod'")
-        print("\nVagy GitHub Actions-ben:")
-        print("  Settings → Secrets → Actions → RAPIDAPI_KEY")
-        print("="*60)
-        sys.exit(1)
-    
-    engine = AIPredictionEngine()
-    fetcher = TennisDataFetcher()
-    
-    print("\n" + "="*70)
-    print("          🎾 TENNIS AI ANALYST PRO v2.0 🎾")
-    print("="*70)
-    
-    # Élő mérkőzések
-    if args.live:
-        print("\n🔴 ÉLŐ MÉRKŐZÉSEK ELEMZÉSE\n")
-        matches = fetcher.get_live_matches()
-        
-        if not matches:
-            print("❌ Nincsenek élő mérkőzések, vagy az API nem elérhető.")
-            sys.exit(0)
-        
-        print(f"✅ {len(matches)} élő mérkőzés található\n")
-        
-        for match in matches:
-            result = engine.predict(
-                match['player1'], match['player2'],
-                match.get('surface', 'hard'),
-                match.get('tournament', ''),
-                match
-            )
-            _print_result(result, args.output)
-    
-    # Mai mérkőzések
-    elif args.today or args.date:
-        date = args.date if args.date else datetime.now().strftime('%Y-%m-%d')
-        print(f"\n📅 DÁTUM: {date}\n")
-        
-        matches = fetcher.get_upcoming_matches(date)
-        
-        if not matches:
-            print(f"❌ Nincsenek mérkőzések ezen a napon: {date}")
-            print("Próbáld másik API végponttal vagy másik nappal.")
-            sys.exit(0)
-        
-        print(f"✅ {len(matches)} mérkőzés található\n")
-        
-        all_results = []
-        for match in matches:
-            result = engine.predict(
-                match['player1'], match['player2'],
-                match.get('surface', 'hard'),
-                match.get('tournament', ''),
-                match
-            )
-            all_results.append(result)
-            _print_result(result, args.output)
-        
-        # JSON fájl mentése
-        os.makedirs('results', exist_ok=True)
-        filename = f"results/predictions_{date.replace('-', '')}.json"
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(all_results, f, indent=2, ensure_ascii=False)
-        print(f"\n💾 Eredmények mentve: {filename}")
-    
-    # Egy mérkőzés
-    elif args.match:
-        if ' vs ' in args.match:
-            p1, p2 = args.match.split(' vs ')
-        elif ' - ' in args.match:
-            p1, p2 = args.match.split(' - ')
-        else:
-            print("Formátum: 'Játékos1 vs Játékos2'")
-            sys.exit(1)
-        
-        result = engine.predict(p1.strip(), p2.strip(), args.surface)
-        _print_result(result, args.output)
-    
-    else:
-        print("\nHASZNÁLAT:")
-        print("  python main.py --today           # Mai mérkőzések")
-        print("  python main.py --live            # Élő mérkőzések")
-        print("  python main.py --date 2024-07-15 # Adott nap")
-        print("  python main.py --match 'Djokovic vs Alcaraz' --surface grass")
-    
-    print("\n⚠️ AI elemzés - NEM befektetési tanács! Fogadás csak saját felelősségre!")
-    print("="*70)
 
-def _print_result(result: Dict, output_type: str):
-    """Eredmény kiírása"""
-    if output_type == 'json':
-        print
+    parser = argparse.ArgumentParser(
+        description="🎾 Tennis AI Analyst PRO"
+    )
+
+    parser.add_argument(
+        "--today",
+        action="store_true",
+        help="Mai mérkőzések"
+    )
+
+    parser.add_argument(
+        "--tomorrow",
+        action="store_true",
+        help="Holnapi mérkőzések"
+    )
+
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Élő mérkőzések"
+    )
+
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Dátum YYYY-MM-DD"
+    )
+
+    parser.add_argument(
+        "--match",
+        type=str,
+        help='Egy mérkőzés: "Player1 vs Player2"'
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum elemzendő meccsek száma"
+    )
+
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON eredmény mentése"
+    )
+
+    args = parser.parse_args()
+
+    # --------------------------------------------------------
+    # API
+    # --------------------------------------------------------
+
+    try:
+
+        api = TennisAPI()
+
+    except RuntimeError as exc:
+
+        print(exc)
+
+        sys.exit(1)
+
+    engine = PredictionEngine(api)
+
+    # --------------------------------------------------------
+    # LIVE
+    # --------------------------------------------------------
+
+    if args.live:
+
+        logger.info(
+            "🔴 Élő mérkőzések lekérése..."
+        )
+
+        raw_matches = api.get_livescore()
+
+        matches = [
+            MatchNormalizer.normalize(x)
+            for x in raw_matches
+        ]
+
+        if not matches:
+
+            print(
+                "\n❌ Jelenleg nincs elérhető élő mérkőzés."
+            )
+
+            sys.exit(0)
+
+        logger.info(
+            "✅ %d élő mérkőzés",
+            len(matches)
+        )
+
+        results = []
+
+        for match in matches[:args.limit]:
+
+            try:
+
+                result = engine.predict(
+                    match
+                )
+
+                print_prediction(result)
+
+                results.append(result)
+
+            except Exception as exc:
+
+                logger.exception(
+                    "❌ Hiba: %s",
+                    exc
+                )
+
+        if args.json:
+
+            save_json(
+                "live_predictions.json",
+                results
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # SINGLE MATCH
+    # --------------------------------------------------------
+
+    if args.match:
+
+        # Először mai + holnapi meccsekben keresünk
+        today = datetime.now()
+
+        raw_matches = api.get_fixtures(
+            today.strftime("%Y-%m-%d"),
+            (
+                today + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        )
+
+        matches = [
+            MatchNormalizer.normalize(x)
+            for x in raw_matches
+        ]
+
+        match = find_match(
+            matches,
+            args.match
+        )
+
+        if not match:
+
+            print(
+                "\n❌ A mérkőzést nem találtam "
+                "a mai/holnapi fixture adatok között."
+            )
+
+            print(
+                "\nPróbáld meg a --date kapcsolót "
+                "a mérkőzés dátumával."
+            )
+
+            sys.exit(1)
+
+        result = engine.predict(
+            match
+        )
+
+        print_prediction(result)
+
+        if args.json:
+
+            save_json(
+                f"match_{match['match_key']}.json",
+                result
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # DATE
+    # --------------------------------------------------------
+
+    if args.date:
+
+        target_date = args.date
+
+    elif args.tomorrow:
+
+        target_date = (
+            datetime.now() +
+            timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+    else:
+
+        # Alapértelmezés: TODAY
+        target_date = (
+            datetime.now()
+        ).strftime("%Y-%m-%d")
+
+    # --------------------------------------------------------
+    # FIXTURES
+    # --------------------------------------------------------
+
+    logger.info(
+        "📅 Mérkőzések lekérése: %s",
+        target_date
+    )
+
+    raw_matches = api.get_fixtures(
+        target_date,
+        target_date
+    )
+
+    matches = [
+        MatchNormalizer.normalize(x)
+        for x in raw_matches
+    ]
+
+    if not matches:
+
+        print()
+        print(
+            f"❌ Nincs mérkőzés vagy az API "
+            f"nem adott vissza adatot: {target_date}"
+        )
+
+        sys.exit(0)
+
+    logger.info(
+        "✅ %d mérkőzés érkezett az API-tól",
+        len(matches)
+    )
+
+    # --------------------------------------------------------
+    # ANALYZE
+    # --------------------------------------------------------
+
+    results = []
+
+    for index, match in enumerate(
+        matches[:args.limit],
+        start=1
+    ):
+
+        print(
+            f"\n[{index}/{min(len(matches), args.limit)}]"
+        )
+
+        try:
+
+            result = engine.predict(
+                match
+            )
+
+            print_prediction(result)
+
+            results.append(result)
+
+        except KeyboardInterrupt:
+
+            print(
+                "\n⛔ Megszakítva."
+            )
+
+            break
+
+        except Exception as exc:
+
+            logger.exception(
+                "❌ Mérkőzés elemzési hiba: %s",
+                exc
+            )
+
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
+
+    if args.json or results:
+
+        filename = (
+            f"predictions_{target_date.replace('-', '')}.json"
+        )
+
+        save_json(
+            filename,
+            results
+        )
+
+    print()
+    print("=" * 78)
+    print(
+        f"✅ Kész. Elemzett mérkőzések: "
+        f"{len(results)}"
+    )
+    print("=" * 78)
+
+
+# ============================================================
+# START
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
