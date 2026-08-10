@@ -15,7 +15,6 @@ lxml==4.9.3
 
 # Database
 sqlalchemy==2.0.23
-sqlite3
 
 # Visualization
 matplotlib==3.7.3
