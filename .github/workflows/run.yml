@@ -1,50 +1,87 @@
-name: Tennis AI Daily
+```yaml
+name: Tennis AI Analyst
 
 on:
   workflow_dispatch:
 
+  schedule:
+    # Minden nap 06:00 UTC = 08:00 magyar idő nyáron
+    - cron: "0 6 * * *"
+
+    # Minden nap 12:00 UTC = 14:00 magyar idő nyáron
+    - cron: "0 12 * * *"
+
+    # Minden nap 18:00 UTC = 20:00 magyar idő nyáron
+    - cron: "0 18 * * *"
+
 jobs:
-  predict:
+  tennis-analysis:
+
     runs-on: ubuntu-latest
-    
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    
-    - name: Install packages
-      run: |
-        pip install --upgrade pip
-        pip install numpy requests scikit-learn xgboost
-    
-    - name: Create directories
-      run: |
-        mkdir -p results
-        mkdir -p logs
-    
-    - name: Run predictions
-      env:
-        RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
-      run: |
-        echo "API Key hossza: ${#RAPIDAPI_KEY}"
-        python main.py --today --output json 2>&1 | tee logs/run.log
-    
-    - name: Check results
-      run: |
-        echo "Results mappa tartalma:"
-        ls -la results/ || echo "Results mappa üres"
-        echo ""
-        echo "Log fájl tartalma:"
-        cat logs/run.log || echo "Nincs log fájl"
-    
-    - name: Upload results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: predictions-${{ github.run_id }}
-        path: |
-          results/
-          logs/
-        retention-days: 7
+
+      # ------------------------------------------------------
+      # REPOSITORY
+      # ------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------
+      # PYTHON
+      # ------------------------------------------------------
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ------------------------------------------------------
+      # DEPENDENCIES
+      # ------------------------------------------------------
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      # ------------------------------------------------------
+      # API KEY CHECK
+      # ------------------------------------------------------
+
+      - name: Check API key
+        env:
+          API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
+        run: |
+          if [ -z "$API_TENNIS_KEY" ]; then
+            echo "❌ API_TENNIS_KEY secret nincs beállítva!"
+            exit 1
+          fi
+
+          echo "✅ API_TENNIS_KEY secret megtalálható."
+
+      # ------------------------------------------------------
+      # RUN TENNIS ANALYST
+      # ------------------------------------------------------
+
+      - name: Run Tennis AI Analyst
+        env:
+          API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
+        run: |
+          python main.py --today --json
+
+      # ------------------------------------------------------
+      # SAVE RESULTS
+      # ------------------------------------------------------
+
+      - name: Upload prediction results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tennis-predictions-${{ github.run_number }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
+```
