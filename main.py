@@ -923,6 +923,9 @@ class PredictionEngine:
         if rank1 is None or rank2 is None:
             return 0.0
 
+        # Logaritmikus különbség.
+        # 1 vs 10 ne legyen 10x erősebb,
+        # de legyen jelentős különbség.
         value = math.log(rank2 + 1) - math.log(rank1 + 1)
 
         return clamp(value / 3.0, -1.0, 1.0)
@@ -1030,227 +1033,6 @@ class PredictionEngine:
         )
 
     # --------------------------------------------------------
-    # SET PREDICTION
-    # --------------------------------------------------------
-
-    def predict_sets(
-        self,
-        match: Dict[str, Any],
-        win_probability: float
-    ) -> Dict[str, Any]:
-        """
-        Szett eredmény predikció
-        """
-
-        tournament = match.get("tournament", "")
-
-        is_best_of_5 = (
-            "Grand Slam" in tournament
-            or "Davis Cup" in tournament
-            or "Olympics" in tournament
-        )
-
-        p1_win_set = win_probability ** 0.85
-
-        if is_best_of_5:
-
-            straight_3 = p1_win_set ** 3
-            four_sets = 3 * (p1_win_set ** 3) * (1 - p1_win_set)
-            five_sets = 6 * (p1_win_set ** 3) * ((1 - p1_win_set) ** 2)
-
-            p1_win_match = straight_3 + four_sets + five_sets
-
-            if p1_win_match > 0:
-                straight_3_prob = straight_3 / p1_win_match * win_probability
-                four_sets_prob = four_sets / p1_win_match * win_probability
-                five_sets_prob = five_sets / p1_win_match * win_probability
-            else:
-                straight_3_prob = four_sets_prob = five_sets_prob = 0
-
-            p2_win_set = 1 - p1_win_set
-
-            p2_straight = (p2_win_set ** 3) * (1 - win_probability)
-            p2_four = (3 * (p2_win_set ** 3) * p1_win_set) * (1 - win_probability)
-            p2_five = (6 * (p2_win_set ** 3) * (p1_win_set ** 2)) * (1 - win_probability)
-
-            scenarios = [
-                {"score": f"3-0 ({match['player1']})", "probability": round(straight_3_prob * 100, 2)},
-                {"score": f"3-1 ({match['player1']})", "probability": round(four_sets_prob * 100, 2)},
-                {"score": f"3-2 ({match['player1']})", "probability": round(five_sets_prob * 100, 2)},
-                {"score": f"0-3 ({match['player2']})", "probability": round(p2_straight * 100, 2)},
-                {"score": f"1-3 ({match['player2']})", "probability": round(p2_four * 100, 2)},
-                {"score": f"2-3 ({match['player2']})", "probability": round(p2_five * 100, 2)}
-            ]
-
-            sets_3 = sum(s["probability"] for s in scenarios if "3-0" in s["score"] or "0-3" in s["score"])
-            sets_4 = sum(s["probability"] for s in scenarios if "3-1" in s["score"] or "1-3" in s["score"])
-            sets_5 = sum(s["probability"] for s in scenarios if "3-2" in s["score"] or "2-3" in s["score"])
-
-            sets_distribution = {
-                "3_szettes": round(sets_3, 2),
-                "4_szettes": round(sets_4, 2),
-                "5_szettes": round(sets_5, 2)
-            }
-
-            if sets_3 >= sets_4 and sets_3 >= sets_5:
-                expected_sets = "3"
-            elif sets_4 >= sets_5:
-                expected_sets = "4"
-            else:
-                expected_sets = "5"
-
-        else:
-
-            straight_2 = p1_win_set ** 2
-            three_sets = 2 * (p1_win_set ** 2) * (1 - p1_win_set)
-
-            p1_win_match = straight_2 + three_sets
-
-            if p1_win_match > 0:
-                straight_2_prob = straight_2 / p1_win_match * win_probability
-                three_sets_p1_prob = three_sets / p1_win_match * win_probability
-            else:
-                straight_2_prob = three_sets_p1_prob = 0
-
-            p2_win_set = 1 - p1_win_set
-
-            p2_straight = (p2_win_set ** 2) * (1 - win_probability)
-            p2_three = (2 * (p2_win_set ** 2) * p1_win_set) * (1 - win_probability)
-
-            scenarios = [
-                {"score": f"2-0 ({match['player1']})", "probability": round(straight_2_prob * 100, 2)},
-                {"score": f"2-1 ({match['player1']})", "probability": round(three_sets_p1_prob * 100, 2)},
-                {"score": f"0-2 ({match['player2']})", "probability": round(p2_straight * 100, 2)},
-                {"score": f"1-2 ({match['player2']})", "probability": round(p2_three * 100, 2)}
-            ]
-
-            sets_2 = sum(s["probability"] for s in scenarios if "2-0" in s["score"] or "0-2" in s["score"])
-            sets_3 = sum(s["probability"] for s in scenarios if "2-1" in s["score"] or "1-2" in s["score"])
-
-            sets_distribution = {
-                "2_szettes": round(sets_2, 2),
-                "3_szettes": round(sets_3, 2)
-            }
-
-            expected_sets = "2" if sets_2 > sets_3 else "3"
-
-        best_scenario = max(scenarios, key=lambda x: x["probability"])
-
-        return {
-            "format": "Best of 5" if is_best_of_5 else "Best of 3",
-            "scenarios": scenarios,
-            "most_likely": best_scenario,
-            "sets_distribution": sets_distribution,
-            "expected_sets": expected_sets,
-            "three_sets_probability": sets_distribution.get("3_szettes", 0),
-            "five_sets_probability": sets_distribution.get("5_szettes", 0) if is_best_of_5 else 0
-        }
-
-    # --------------------------------------------------------
-    # TOTAL GAMES PREDICTION
-    # --------------------------------------------------------
-
-    def predict_total_games(
-        self,
-        match: Dict[str, Any],
-        stats1: Dict[str, float],
-        stats2: Dict[str, float]
-    ) -> Dict[str, Any]:
-        """
-        Összes játék számának predikciója
-        """
-
-        p1_serve = stats1.get("service_games_won")
-        if p1_serve is None:
-            p1_serve = stats1.get("first_serve_points_won", 70)
-
-        p2_serve = stats2.get("service_games_won")
-        if p2_serve is None:
-            p2_serve = stats2.get("first_serve_points_won", 70)
-
-        p1_hold = clamp(p1_serve / 100.0, 0.50, 0.95)
-        p2_hold = clamp(p2_serve / 100.0, 0.50, 0.95)
-
-        p1_break = 1 - p2_hold
-        p2_break = 1 - p1_hold
-
-        expected_games_set = 6 / p1_hold + 6 / p2_hold
-        tight_set_prob = p1_break * p2_break * 2
-        expected_games_set += tight_set_prob * 3
-
-        tournament = match.get("tournament", "")
-        is_best_of_5 = (
-            "Grand Slam" in tournament
-            or "Davis Cup" in tournament
-            or "Olympics" in tournament
-        )
-
-        if is_best_of_5:
-            avg_sets = 3.8
-            expected_total = expected_games_set * avg_sets
-            min_games = expected_games_set * 2.5
-            max_games = expected_games_set * 5.5
-        else:
-            avg_sets = 2.3
-            expected_total = expected_games_set * avg_sets
-            min_games = expected_games_set * 1.8
-            max_games = expected_games_set * 3.5
-
-        expected_total = round(expected_total, 1)
-        min_games = round(min_games, 1)
-        max_games = round(max_games, 1)
-
-        ou_tips = []
-        thresholds = [17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5,
-                      33.5, 34.5, 35.5, 36.5, 37.5, 38.5, 39.5]
-
-        for threshold in thresholds:
-            if is_best_of_5 and threshold < 30:
-                continue
-            if not is_best_of_5 and threshold > 26:
-                continue
-
-            if expected_total > threshold:
-                diff = expected_total - threshold
-                if diff > 3:
-                    confidence = "MAGAS"
-                elif diff > 1.5:
-                    confidence = "KÖZEPES"
-                else:
-                    confidence = "ALACSONY"
-
-                ou_tips.append({
-                    "line": f"OVER {threshold}",
-                    "confidence": confidence,
-                    "expected": expected_total,
-                    "difference": round(diff, 1)
-                })
-            else:
-                diff = threshold - expected_total
-                if diff > 3:
-                    confidence = "MAGAS"
-                elif diff > 1.5:
-                    confidence = "KÖZEPES"
-                else:
-                    confidence = "ALACSONY"
-
-                ou_tips.append({
-                    "line": f"UNDER {threshold}",
-                    "confidence": confidence,
-                    "expected": expected_total,
-                    "difference": round(diff, 1)
-                })
-
-        return {
-            "expected_total_games": expected_total,
-            "range": {"min": min_games, "max": max_games},
-            "expected_games_per_set": round(expected_games_set, 1),
-            "tight_set_probability": round(tight_set_prob * 100, 1),
-            "best_over_under": ou_tips[:5],
-            "format": "Best of 5" if is_best_of_5 else "Best of 3"
-        }
-
-    # --------------------------------------------------------
 
     def predict(
         self,
@@ -1340,11 +1122,27 @@ class PredictionEngine:
         # FEATURES
         # ----------------------------------------------------
 
-        ranking_score = self._ranking_score(rank1, rank2)
-        form_score = self._form_score(form1, form2)
-        surface_score = self._surface_score(form1, form2)
+        ranking_score = self._ranking_score(
+            rank1,
+            rank2
+        )
+
+        form_score = self._form_score(
+            form1,
+            form2
+        )
+
+        surface_score = self._surface_score(
+            form1,
+            form2
+        )
+
         h2h_score = self._h2h_score(h2h)
-        stats_score = self._player_stats_score(stats1, stats2)
+
+        stats_score = self._player_stats_score(
+            stats1,
+            stats2
+        )
 
         # ----------------------------------------------------
         # DATA QUALITY
@@ -1353,10 +1151,808 @@ class PredictionEngine:
         available_features = 0
         total_features = 5
 
-        for value in [ranking_score, form_score, surface_score, h2h_score, stats_score]:
+        for value in [
+            ranking_score,
+            form_score,
+            surface_score,
+            h2h_score,
+            stats_score
+        ]:
+
             if value != 0:
                 available_features += 1
 
-        data_quality = available_features / total_features
+        data_quality = (
+            available_features / total_features
+        )
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # WEIGHTS
+        # ----------------------------------------------------
+
+        # Ranking
+        weighted_score = (
+            ranking_score * 0.28
+            +
+            form_score * 0.27
+            +
+            surface_score * 0.23
+            +
+            h2h_score * 0.10
+            +
+            stats_score * 0.12
+        )
+
+        # ----------------------------------------------------
+        # PROBABILITY
+        # ----------------------------------------------------
+
+        probability = sigmoid(
+            weighted_score * 4.2
+        )
+
+        probability = clamp(
+            probability,
+            0.03,
+            0.97
+        )
+
+        p1_probability = probability
+        p2_probability = 1.0 - probability
+
+        if p1_probability >= p2_probability:
+
+            winner = player1
+            winner_probability = p1_probability
+
+        else:
+
+            winner = player2
+            winner_probability = p2_probability
+
+        # ----------------------------------------------------
+        # CONFIDENCE
+        # ----------------------------------------------------
+
+        # Nem állítjuk, hogy a confidence a találati esély.
+        # Azt mutatja, mennyi használható adat állt rendelkezésre.
+
+        confidence = clamp(
+            0.45 + data_quality * 0.50,
+            0.45,
+            0.95
+        )
+
+        if winner_probability >= 0.70:
+            level = "ERŐS ELŐNY"
+
+        elif winner_probability >= 0.60:
+            level = "ELŐNY"
+
+        elif winner_probability >= 0.55:
+            level = "ENYHE ELŐNY"
+
+        else:
+            level = "KIEGYENLÍTETT"
+
+        # ----------------------------------------------------
+        # FAIR ODDS
+        # ----------------------------------------------------
+
+        fair_odds = (
+            1.0 / winner_probability
+        )
+
+        # ----------------------------------------------------
+        # RESULT
+        # ----------------------------------------------------
+
+        return {
+
+            "match": {
+                "match_key": match["match_key"],
+                "player1": player1,
+                "player2": player2,
+                "player1_key": player1_key,
+                "player2_key": player2_key,
+                "tournament": match["tournament"],
+                "round": match["round"],
+                "surface": surface,
+                "date": match["date"],
+                "time": match["time"],
+                "status": match["status"]
+            },
+
+            "prediction": {
+
+                "winner": winner,
+
+                "player1_probability": round(
+                    p1_probability * 100,
+                    2
+                ),
+
+                "player2_probability": round(
+                    p2_probability * 100,
+                    2
+                ),
+
+                "winner_probability": round(
+                    winner_probability * 100,
+                    2
+                ),
+
+                "fair_odds": round(
+                    fair_odds,
+                    3
+                ),
+
+                "level": level,
+
+                "confidence": round(
+                    confidence * 100,
+                    1
+                )
+            },
+
+            "features": {
+
+                "ranking": {
+                    "player1": rank1,
+                    "player2": rank2,
+                    "score": round(
+                        ranking_score,
+                        4
+                    )
+                },
+
+                "recent_form": {
+                    "player1": form1,
+                    "player2": form2,
+                    "score": round(
+                        form_score,
+                        4
+                    )
+                },
+
+                "surface_form": {
+                    "surface": surface,
+                    "player1": form1.get(
+                        "surface_win_pct"
+                    ),
+                    "player2": form2.get(
+                        "surface_win_pct"
+                    ),
+                    "score": round(
+                        surface_score,
+                        4
+                    )
+                },
+
+                "h2h": h2h,
+
+                "statistics": {
+                    "player1": stats1,
+                    "player2": stats2,
+                    "score": round(
+                        stats_score,
+                        4
+                    )
+                }
+            },
+
+            "data_quality": round(
+                data_quality * 100,
+                1
+            ),
+
+            "generated_at": datetime.now().isoformat()
+        }
+
+
+# ============================================================
+# ODDS ANALYSIS
+# ============================================================
+
+class OddsAnalyzer:
+
+    @staticmethod
+    def find_best_match_winner_odds(
+        odds_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+
+        result = {}
+
+        if not isinstance(odds_data, dict):
+            return result
+
+        for match_id, markets in odds_data.items():
+
+            if not isinstance(markets, dict):
+                continue
+
+            market = markets.get("Home/Away")
+
+            if not isinstance(market, dict):
+                continue
+
+            home = market.get("Home", {})
+            away = market.get("Away", {})
+
+            if isinstance(home, dict):
+
+                values = []
+
+                for bookmaker, value in home.items():
+
+                    odd = safe_float(value)
+
+                    if odd and odd > 1:
+                        values.append(
+                            (bookmaker, odd)
+                        )
+
+                if values:
+                    result["player1"] = max(
+                        values,
+                        key=lambda x: x[1]
+                    )
+
+            if isinstance(away, dict):
+
+                values = []
+
+                for bookmaker, value in away.items():
+
+                    odd = safe_float(value)
+
+                    if odd and odd > 1:
+                        values.append(
+                            (bookmaker, odd)
+                        )
+
+                if values:
+                    result["player2"] = max(
+                        values,
+                        key=lambda x: x[1]
+                    )
+
+        return result
+
+
+# ============================================================
+# PRINT
+# ============================================================
+
+def print_prediction(result: Dict[str, Any]):
+
+    match = result["match"]
+    prediction = result["prediction"]
+
+    print()
+    print("=" * 78)
+    print("🎾 TENNIS AI ANALYST PRO")
+    print("=" * 78)
+
+    print(
+        f"\n🏟️ {match['player1']} vs {match['player2']}"
+    )
+
+    print(
+        f"🏆 {match['tournament']}"
+    )
+
+    if match["round"]:
+        print(
+            f"🔄 Forduló: {match['round']}"
+        )
+
+    print(
+        f"🎾 Borítás: {match['surface']}"
+    )
+
+    print(
+        f"📅 {match['date']} {match['time']}"
+    )
+
+    print()
+    print("🧠 PREDIKCIÓ")
+    print("-" * 78)
+
+    print(
+        f"🏆 Várható győztes: "
+        f"{prediction['winner']}"
+    )
+
+    print(
+        f"📊 {match['player1']}: "
+        f"{prediction['player1_probability']:.2f}%"
+    )
+
+    print(
+        f"📊 {match['player2']}: "
+        f"{prediction['player2_probability']:.2f}%"
+    )
+
+    print(
+        f"🎯 Modell valószínűség: "
+        f"{prediction['winner_probability']:.2f}%"
+    )
+
+    print(
+        f"💰 Fair odds: "
+        f"{prediction['fair_odds']:.3f}"
+    )
+
+    print(
+        f"📈 Szint: "
+        f"{prediction['level']}"
+    )
+
+    print(
+        f"🔎 Adatminőség: "
+        f"{result['data_quality']:.1f}%"
+    )
+
+    print(
+        f"📌 Modell confidence: "
+        f"{prediction['confidence']:.1f}%"
+    )
+
+    print()
+    print("📋 RÉSZLETES ADATOK")
+    print("-" * 78)
+
+    features = result["features"]
+
+    ranking = features["ranking"]
+
+    print(
+        f"🌍 Ranking: "
+        f"{match['player1']} = "
+        f"{ranking['player1'] or 'N/A'} | "
+        f"{match['player2']} = "
+        f"{ranking['player2'] or 'N/A'}"
+    )
+
+    form = features["recent_form"]
+
+    print(
+        f"🔥 Forma: "
+        f"{form['player1']['wins']}-"
+        f"{form['player1']['losses']} | "
+        f"{form['player2']['wins']}-"
+        f"{form['player2']['losses']}"
+    )
+
+    surface = features["surface_form"]
+
+    print(
+        f"🎾 {surface['surface']} forma: "
+        f"{surface['player1'] if surface['player1'] is not None else 'N/A'}% | "
+        f"{surface['player2'] if surface['player2'] is not None else 'N/A'}%"
+    )
+
+    h2h = features["h2h"]
+
+    print(
+        f"🤝 H2H: "
+        f"{h2h['player1_wins']}-"
+        f"{h2h['player2_wins']}"
+    )
+
+    if h2h["surface_total"]:
+
+        print(
+            f"🤝 H2H {surface['surface']}: "
+            f"{h2h['surface_player1_wins']}/"
+            f"{h2h['surface_total']}"
+        )
+
+    print()
+    print(
+        "⚠️ FONTOS: A százalék modellbecslés, "
+        "nem garantált eredmény."
+    )
+
+    print("=" * 78)
+
+
+# ============================================================
+# SAVE JSON
+# ============================================================
+
+def save_json(
+    filename: str,
+    data: Any
+):
+
+    path = os.path.join(
+        RESULTS_DIR,
+        filename
+    )
+
+    with open(
+        path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            data,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    logger.info(
+        "💾 Mentve: %s",
+        path
+    )
+
+
+# ============================================================
+# FIND MATCH
+# ============================================================
+
+def find_match(
+    matches: List[Dict[str, Any]],
+    search: str
+) -> Optional[Dict[str, Any]]:
+
+    search_normalized = normalize_name(
+        search
+    )
+
+    if " vs " in search_normalized:
+
+        p1, p2 = search_normalized.split(
+            " vs ",
+            1
+        )
+
+    elif " - " in search_normalized:
+
+        p1, p2 = search_normalized.split(
+            " - ",
+            1
+        )
+
+    else:
+
+        return None
+
+    for match in matches:
+
+        a = normalize_name(
+            match["player1"]
+        )
+
+        b = normalize_name(
+            match["player2"]
+        )
+
+        if (
+            (p1 in a and p2 in b)
+            or
+            (p2 in a and p1 in b)
+        ):
+
+            return match
+
+    return None
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser(
+        description="🎾 Tennis AI Analyst PRO"
+    )
+
+    parser.add_argument(
+        "--today",
+        action="store_true",
+        help="Mai mérkőzések"
+    )
+
+    parser.add_argument(
+        "--tomorrow",
+        action="store_true",
+        help="Holnapi mérkőzések"
+    )
+
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Élő mérkőzések"
+    )
+
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Dátum YYYY-MM-DD"
+    )
+
+    parser.add_argument(
+        "--match",
+        type=str,
+        help='Egy mérkőzés: "Player1 vs Player2"'
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum elemzendő meccsek száma"
+    )
+
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON eredmény mentése"
+    )
+
+    args = parser.parse_args()
+
+    # --------------------------------------------------------
+    # API
+    # --------------------------------------------------------
+
+    try:
+
+        api = TennisAPI()
+
+    except RuntimeError as exc:
+
+        print(exc)
+
+        sys.exit(1)
+
+    engine = PredictionEngine(api)
+
+    # --------------------------------------------------------
+    # LIVE
+    # --------------------------------------------------------
+
+    if args.live:
+
+        logger.info(
+            "🔴 Élő mérkőzések lekérése..."
+        )
+
+        raw_matches = api.get_livescore()
+
+        matches = [
+            MatchNormalizer.normalize(x)
+            for x in raw_matches
+        ]
+
+        if not matches:
+
+            print(
+                "\n❌ Jelenleg nincs elérhető élő mérkőzés."
+            )
+
+            sys.exit(0)
+
+        logger.info(
+            "✅ %d élő mérkőzés",
+            len(matches)
+        )
+
+        results = []
+
+        for match in matches[:args.limit]:
+
+            try:
+
+                result = engine.predict(
+                    match
+                )
+
+                print_prediction(result)
+
+                results.append(result)
+
+            except Exception as exc:
+
+                logger.exception(
+                    "❌ Hiba: %s",
+                    exc
+                )
+
+        if args.json:
+
+            save_json(
+                "live_predictions.json",
+                results
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # SINGLE MATCH
+    # --------------------------------------------------------
+
+    if args.match:
+
+        # Először mai + holnapi meccsekben keresünk
+        today = datetime.now()
+
+        raw_matches = api.get_fixtures(
+            today.strftime("%Y-%m-%d"),
+            (
+                today + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        )
+
+        matches = [
+            MatchNormalizer.normalize(x)
+            for x in raw_matches
+        ]
+
+        match = find_match(
+            matches,
+            args.match
+        )
+
+        if not match:
+
+            print(
+                "\n❌ A mérkőzést nem találtam "
+                "a mai/holnapi fixture adatok között."
+            )
+
+            print(
+                "\nPróbáld meg a --date kapcsolót "
+                "a mérkőzés dátumával."
+            )
+
+            sys.exit(1)
+
+        result = engine.predict(
+            match
+        )
+
+        print_prediction(result)
+
+        if args.json:
+
+            save_json(
+                f"match_{match['match_key']}.json",
+                result
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # DATE
+    # --------------------------------------------------------
+
+    if args.date:
+
+        target_date = args.date
+
+    elif args.tomorrow:
+
+        target_date = (
+            datetime.now() +
+            timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+    else:
+
+        # Alapértelmezés: TODAY
+        target_date = (
+            datetime.now()
+        ).strftime("%Y-%m-%d")
+
+    # --------------------------------------------------------
+    # FIXTURES
+    # --------------------------------------------------------
+
+    logger.info(
+        "📅 Mérkőzések lekérése: %s",
+        target_date
+    )
+
+    raw_matches = api.get_fixtures(
+        target_date,
+        target_date
+    )
+
+    matches = [
+        MatchNormalizer.normalize(x)
+        for x in raw_matches
+    ]
+
+    if not matches:
+
+        print()
+        print(
+            f"❌ Nincs mérkőzés vagy az API "
+            f"nem adott vissza adatot: {target_date}"
+        )
+
+        sys.exit(0)
+
+    logger.info(
+        "✅ %d mérkőzés érkezett az API-tól",
+        len(matches)
+    )
+
+    # --------------------------------------------------------
+    # ANALYZE
+    # --------------------------------------------------------
+
+    results = []
+
+    for index, match in enumerate(
+        matches[:args.limit],
+        start=1
+    ):
+
+        print(
+            f"\n[{index}/{min(len(matches), args.limit)}]"
+        )
+
+        try:
+
+            result = engine.predict(
+                match
+            )
+
+            print_prediction(result)
+
+            results.append(result)
+
+        except KeyboardInterrupt:
+
+            print(
+                "\n⛔ Megszakítva."
+            )
+
+            break
+
+        except Exception as exc:
+
+            logger.exception(
+                "❌ Mérkőzés elemzési hiba: %s",
+                exc
+            )
+
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
+
+    if args.json or results:
+
+        filename = (
+            f"predictions_{target_date.replace('-', '')}.json"
+        )
+
+        save_json(
+            filename,
+            results
+        )
+
+    print()
+    print("=" * 78)
+    print(
+        f"✅ Kész. Elemzett mérkőzések: "
+        f"{len(results)}"
+    )
+    print("=" * 78)
+
+
+# ============================================================
+# START
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
