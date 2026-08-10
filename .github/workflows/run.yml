@@ -1,87 +1,67 @@
-```yaml
-name: Tennis AI Analyst
+name: 🎾 Tennis AI Daily
 
 on:
-  workflow_dispatch:
-
   schedule:
-    # Minden nap 06:00 UTC = 08:00 magyar idő nyáron
-    - cron: "0 6 * * *"
-
-    # Minden nap 12:00 UTC = 14:00 magyar idő nyáron
-    - cron: "0 12 * * *"
-
-    # Minden nap 18:00 UTC = 20:00 magyar idő nyáron
-    - cron: "0 18 * * *"
+    - cron: '0 7 * * *'    # Reggel 7
+    - cron: '0 14 * * *'   # Délután 2
+    - cron: '0 20 * * *'   # Este 8
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Dátum (YYYY-MM-DD) - üres = ma'
+        required: false
+      match:
+        description: 'Konkrét meccs (pl. Alcaraz vs Djokovic)'
+        required: false
+      live:
+        description: 'Élő meccsek? (igen/nem)'
+        required: false
+        default: 'nem'
 
 jobs:
-  tennis-analysis:
-
+  analyze:
     runs-on: ubuntu-latest
-
+    
     steps:
-
-      # ------------------------------------------------------
-      # REPOSITORY
-      # ------------------------------------------------------
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ------------------------------------------------------
-      # PYTHON
-      # ------------------------------------------------------
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      # ------------------------------------------------------
-      # DEPENDENCIES
-      # ------------------------------------------------------
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      # ------------------------------------------------------
-      # API KEY CHECK
-      # ------------------------------------------------------
-
-      - name: Check API key
-        env:
-          API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
-        run: |
-          if [ -z "$API_TENNIS_KEY" ]; then
-            echo "❌ API_TENNIS_KEY secret nincs beállítva!"
-            exit 1
-          fi
-
-          echo "✅ API_TENNIS_KEY secret megtalálható."
-
-      # ------------------------------------------------------
-      # RUN TENNIS ANALYST
-      # ------------------------------------------------------
-
-      - name: Run Tennis AI Analyst
-        env:
-          API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
-        run: |
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install requests
+    
+    - name: Create directories
+      run: |
+        mkdir -p cache results
+    
+    - name: Run Tennis AI
+      env:
+        API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
+      run: |
+        if [ "${{ github.event.inputs.live }}" = "igen" ]; then
+          python main.py --live --json
+        elif [ -n "${{ github.event.inputs.match }}" ]; then
+          python main.py --match "${{ github.event.inputs.match }}" --json
+        elif [ -n "${{ github.event.inputs.date }}" ]; then
+          python main.py --date "${{ github.event.inputs.date }}" --json
+        else
           python main.py --today --json
-
-      # ------------------------------------------------------
-      # SAVE RESULTS
-      # ------------------------------------------------------
-
-      - name: Upload prediction results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tennis-predictions-${{ github.run_number }}
-          path: results/
-          if-no-files-found: warn
-          retention-days: 30
-```
+        fi
+    
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: tennis-predictions-${{ github.run_id }}
+        path: results/
+        retention-days: 30
+    
+    - name: Commit results to repo
+      run: |
+        git config user.name 'Tennis AI Bot'
+        git config user.email 'bot@tennis-ai.com'
+        git add results/ cache/
+        git diff --quiet || (git commit -m "🎾 Auto predictions $(date +%Y-%m-%d)" && git push)
