@@ -2,23 +2,20 @@ name: Tennis AI Daily Predictions
 
 on:
   schedule:
-    # Futás minden nap reggel 8:00-kor (UTC)
     - cron: '0 8 * * *'
-    # És minden nap este 20:00-kor
     - cron: '0 20 * * *'
-  # Manuális futtatás lehetősége
   workflow_dispatch:
     inputs:
       player1:
-        description: 'Első játékos neve'
+        description: 'First player name'
         required: false
         default: 'Novak Djokovic'
       player2:
-        description: 'Második játékos neve'
+        description: 'Second player name'
         required: false
         default: 'Carlos Alcaraz'
       surface:
-        description: 'Borítás típusa'
+        description: 'Surface type'
         required: false
         default: 'hard'
         type: choice
@@ -38,4 +35,35 @@ jobs:
       uses: actions/checkout@v3
     
     - name: Set up Python
-      uses: actions/setup-python@v
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Create necessary directories
+      run: |
+        mkdir -p models data/raw data/processed results logs
+    
+    - name: Run predictions
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          python main.py \
+            --player1 "${{ github.event.inputs.player1 }}" \
+            --player2 "${{ github.event.inputs.player2 }}" \
+            --surface "${{ github.event.inputs.surface }}" \
+            --output json
+        else
+          echo "Running scheduled predictions..."
+          python main.py --player1 "Novak Djokovic" --player2 "Carlos Alcaraz" --surface hard --output json
+        fi
+    
+    - name: Upload prediction results
+      uses: actions/upload-artifact@v3
+      with:
+        name: prediction-results
+        path: results/
+        retention-days: 30
