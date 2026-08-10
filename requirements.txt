@@ -1,0 +1,31 @@
+# Core
+numpy==1.24.3
+pandas==2.0.3
+scikit-learn==1.3.2
+xgboost==1.7.6
+
+# API & Web
+requests==2.31.0
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# Data
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# Database
+sqlalchemy==2.0.23
+sqlite3
+
+# Visualization
+matplotlib==3.7.3
+seaborn==0.13.0
+
+# Utilities
+python-dotenv==1.0.0
+pyyaml==6.0.1
+joblib==1.3.2
+tqdm==4.66.1
+
+# Testing
+pytest==7.4.3
