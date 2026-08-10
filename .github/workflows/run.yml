@@ -1,25 +1,41 @@
-name: Tenisz AI Futtato (LIVE 15m)
+name: Tennis AI Daily Predictions
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # 15 percenként automatikusan lefut
-  workflow_dispatch: # Kézi indítás gombbal bármikor
+    # Futás minden nap reggel 8:00-kor (UTC)
+    - cron: '0 8 * * *'
+    # És minden nap este 20:00-kor
+    - cron: '0 20 * * *'
+  # Manuális futtatás lehetősége
+  workflow_dispatch:
+    inputs:
+      player1:
+        description: 'Első játékos neve'
+        required: false
+        default: 'Novak Djokovic'
+      player2:
+        description: 'Második játékos neve'
+        required: false
+        default: 'Carlos Alcaraz'
+      surface:
+        description: 'Borítás típusa'
+        required: false
+        default: 'hard'
+        type: choice
+        options:
+          - hard
+          - clay
+          - grass
+          - indoor
 
 jobs:
-  run-ai:
+  predict:
+    name: Generate Tennis Predictions
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Kod letoltese
-        uses: actions/checkout@v3
-
-      - name: Python beallitasa
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Csomagok telepitese
-        run: |
-          pip install numpy pandas scipy requests beautifulsoup4
-
-      - name: AI Futtatasa
-        run: python main.py
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v
