@@ -1,8 +1,6 @@
 name: Tennis AI Daily
 
 on:
-  schedule:
-    - cron: '0 7 * * *'  # Reggel 7-kor
   workflow_dispatch:
 
 jobs:
@@ -16,18 +14,37 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: Install
-      run: pip install numpy requests scikit-learn xgboost
+    - name: Install packages
+      run: |
+        pip install --upgrade pip
+        pip install numpy requests scikit-learn xgboost
+    
+    - name: Create directories
+      run: |
+        mkdir -p results
+        mkdir -p logs
     
     - name: Run predictions
       env:
         RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
       run: |
-        mkdir -p results
-        python main.py --today --output json
+        echo "API Key hossza: ${#RAPIDAPI_KEY}"
+        python main.py --today --output json 2>&1 | tee logs/run.log
+    
+    - name: Check results
+      run: |
+        echo "Results mappa tartalma:"
+        ls -la results/ || echo "Results mappa üres"
+        echo ""
+        echo "Log fájl tartalma:"
+        cat logs/run.log || echo "Nincs log fájl"
     
     - name: Upload results
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: predictions
-        path: results/
+        name: predictions-${{ github.run_id }}
+        path: |
+          results/
+          logs/
+        retention-days: 7
